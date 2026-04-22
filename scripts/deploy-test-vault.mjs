@@ -3,8 +3,12 @@ import path from "node:path";
 import process from "node:process";
 
 const pluginId = "obsidian-filen-sync";
-const defaultVault = "/Users/agustiawan/Developer/git/kepano-obsidian";
-const vaultPath = process.env.TEST_VAULT_PATH ?? defaultVault;
+const vaultPath = process.env.TEST_VAULT_PATH ?? process.argv[2];
+
+if (!vaultPath) {
+	throw new Error("Set TEST_VAULT_PATH or pass vault path as argv[2].");
+}
+
 const pluginDir = path.join(vaultPath, ".obsidian", "plugins", pluginId);
 const artifacts = ["main.js", "manifest.json", "styles.css"];
 

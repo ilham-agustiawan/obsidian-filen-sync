@@ -1,9 +1,12 @@
+import { Bytes } from "./bytes";
+
 export type FileJournalEntry = {
 	type: "file";
 	path: string;
 	mtime: number;
 	ctime: number;
 	size: number;
+	hash?: string;
 	contentBase64: string;
 };
 
@@ -26,7 +29,7 @@ const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
 export const Journal = {
-	encode(envelope: JournalEnvelope): Uint8Array {
+	async encode(envelope: JournalEnvelope): Promise<Uint8Array> {
 		const lines = [
 			JSON.stringify({
 				type: "header",
@@ -37,12 +40,15 @@ export const Journal = {
 			...envelope.entries.map((entry) => JSON.stringify(entry)),
 		];
 
-		return textEncoder.encode(lines.join("\n"));
+		return Bytes.compress(textEncoder.encode(lines.join("\n")));
 	},
 
-	decode(bytes: Uint8Array): JournalEnvelope {
+	async decode(bytes: Uint8Array): Promise<JournalEnvelope> {
+		// Auto-detect gzip by magic bytes for backward compat with uncompressed journals.
+		const raw = Bytes.isGzip(bytes) ? await Bytes.decompress(bytes) : bytes;
+
 		const lines = textDecoder
-			.decode(bytes)
+			.decode(raw)
 			.split("\n")
 			.map((line) => line.trim())
 			.filter((line) => line.length > 0);
@@ -90,12 +96,14 @@ const parseEntry = (line: string): JournalEntry => {
 			typeof raw.size === "number" &&
 			typeof raw.contentBase64 === "string"
 		) {
+			const hash = typeof raw.hash === "string" ? raw.hash : undefined;
 			return {
 				type: "file",
 				path: raw.path,
 				mtime: raw.mtime,
 				ctime: raw.ctime,
 				size: raw.size,
+				...(hash !== undefined ? { hash } : {}),
 				contentBase64: raw.contentBase64,
 			};
 		}

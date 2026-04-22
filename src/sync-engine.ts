@@ -63,7 +63,7 @@ export class SyncEngine {
 			entries,
 		};
 
-		await this.config.remote.writeFile(journalKey, Journal.encode(envelope));
+		await this.config.remote.writeFile(journalKey, await Journal.encode(envelope));
 		this.config.settings.state.files = changes.files;
 		this.config.settings.state.sentJournalKeys = rememberSentKey(
 			this.config.settings.state.sentJournalKeys,
@@ -91,7 +91,7 @@ export class SyncEngine {
 				continue;
 			}
 
-			const envelope = Journal.decode(await this.config.remote.readFile(key));
+			const envelope = await Journal.decode(await this.config.remote.readFile(key));
 			for (const entry of envelope.entries) {
 				const result = await this.applyRemoteEntry(entry, envelope.deviceId, envelope.createdAt);
 				applied += result.applied;
@@ -118,20 +118,32 @@ export class SyncEngine {
 		for (const [path, file] of currentFiles) {
 			const current = toSyncedFileRecord(file);
 			const previous = this.config.settings.state.files[path];
+
+			// Fast path: metadata unchanged — no need to read content.
 			if (previous !== undefined && sameFileRecord(previous, current)) {
 				continue;
 			}
 
-			const content = await this.config.app.vault.readBinary(file);
+			const content = new Uint8Array(await this.config.app.vault.readBinary(file));
+			const hash = await Bytes.sha256hex(content);
+
+			// Content unchanged despite metadata shift — skip to avoid redundant upload.
+			if (previous?.hash !== undefined && previous.hash === hash) {
+				// Update metadata in state so the fast path triggers next time.
+				files[path] = { ...current, hash };
+				continue;
+			}
+
 			entries.push({
 				type: "file",
 				path,
 				mtime: current.mtime,
 				ctime: current.ctime,
 				size: current.size,
-				contentBase64: Bytes.toBase64(new Uint8Array(content)),
+				hash,
+				contentBase64: Bytes.toBase64(content),
 			});
-			files[path] = current;
+			files[path] = { ...current, hash };
 		}
 
 		for (const path of Object.keys(this.config.settings.state.files)) {
@@ -187,6 +199,7 @@ export class SyncEngine {
 			mtime: entry.mtime,
 			ctime: entry.ctime,
 			size: entry.size,
+			...(entry.hash !== undefined ? { hash: entry.hash } : {}),
 		};
 
 		return { applied: 1, conflicts: localFile !== null && localChanged ? 1 : 0 };
@@ -247,11 +260,18 @@ const toSyncedFileRecord = (file: TFile): SyncedFileRecord => ({
 	size: file.stat.size,
 });
 
-const sameFileRecord = (left: SyncedFileRecord, right: SyncedFileRecord): boolean =>
-	left.path === right.path &&
-	left.mtime === right.mtime &&
-	left.ctime === right.ctime &&
-	left.size === right.size;
+const sameFileRecord = (left: SyncedFileRecord, right: SyncedFileRecord): boolean => {
+	if (left.hash !== undefined && right.hash !== undefined) {
+		return left.hash === right.hash;
+	}
+
+	return (
+		left.path === right.path &&
+		left.mtime === right.mtime &&
+		left.ctime === right.ctime &&
+		left.size === right.size
+	);
+};
 
 const shouldSyncPath = (path: string, configDir: string): boolean => {
 	if (path.length === 0) {

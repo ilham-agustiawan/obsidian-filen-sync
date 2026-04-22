@@ -9,13 +9,14 @@ export default class FilenSyncPlugin extends Plugin {
 	private sessionTwoFactorCode = "";
 	private statusBarItemEl: HTMLElement | null = null;
 	private syncEngine: SyncEngine | null = null;
+	private isSyncing = false;
 
 	async onload() {
 		await this.loadSettings();
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.setStatus("Idle");
 
-		this.addRibbonIcon("sync", "Sync with filen", () => {
+		this.addRibbonIcon("sync", "Filen sync: sync now", () => {
 			void this.syncNow();
 		});
 
@@ -99,36 +100,51 @@ export default class FilenSyncPlugin extends Plugin {
 		await this.saveData(this.settings);
 	}
 
-	private async syncNow() {
+	async syncNow() {
 		await this.runSyncTask("Sync", async (engine) => {
 			const pulled = await engine.pull();
 			const pushed = await engine.push();
-			return `pulled ${pulled.applied}, conflicts ${pulled.conflicts}, pushed ${pushed.entries}`;
+			const parts: string[] = [];
+			if (pulled.applied > 0 || pulled.conflicts > 0) {
+				parts.push(`pulled ${pulled.applied}`);
+				if (pulled.conflicts > 0) parts.push(`${pulled.conflicts} conflict(s)`);
+			}
+			if (pushed.entries > 0) parts.push(`pushed ${pushed.entries}`);
+			return parts.length > 0 ? parts.join(", ") : "up to date";
 		});
 	}
 
 	private async pushLocalChanges() {
 		await this.runSyncTask("Push", async (engine) => {
 			const result = await engine.push();
-			return `pushed ${result.entries}`;
+			return result.entries > 0 ? `pushed ${result.entries}` : "nothing to push";
 		});
 	}
 
 	private async pullRemoteChanges() {
 		await this.runSyncTask("Pull", async (engine) => {
 			const result = await engine.pull();
-			return `pulled ${result.applied}, conflicts ${result.conflicts}`;
+			const parts: string[] = [];
+			if (result.applied > 0) parts.push(`pulled ${result.applied}`);
+			if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
+			return parts.length > 0 ? parts.join(", ") : "nothing to pull";
 		});
 	}
 
-	private async testConnection() {
-		await this.runSyncTask("Connection", async (engine) => {
+	async testConnection() {
+		await this.runSyncTask("Connection test", async (engine) => {
 			await engine.testRemote();
-			return "ok";
+			return "connection ok";
 		});
 	}
 
 	private async runSyncTask(label: string, task: (engine: SyncEngine) => Promise<string>) {
+		if (this.isSyncing) {
+			new Notice("Sync already in progress.");
+			return;
+		}
+
+		this.isSyncing = true;
 		try {
 			this.setStatus(`${label}...`);
 			const engine = this.getSyncEngine();
@@ -140,6 +156,8 @@ export default class FilenSyncPlugin extends Plugin {
 			this.setStatus(`${label} failed`);
 			console.error(`${label} failed`, error);
 			new Notice(`${label} failed: ${message}`);
+		} finally {
+			this.isSyncing = false;
 		}
 	}
 

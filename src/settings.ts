@@ -6,6 +6,7 @@ export type SyncedFileRecord = {
 	mtime: number;
 	ctime: number;
 	size: number;
+	hash?: string;
 };
 
 export type SyncState = {
@@ -81,11 +82,13 @@ const readSyncedFiles = (value: unknown): Record<string, SyncedFileRecord> => {
 		}
 
 		const recordPath = readString(rawRecord.path, path);
+		const hash = typeof rawRecord.hash === "string" ? rawRecord.hash : undefined;
 		files[path] = {
 			path: recordPath,
 			mtime: readNumber(rawRecord.mtime, 0),
 			ctime: readNumber(rawRecord.ctime, 0),
 			size: readNumber(rawRecord.size, 0),
+			...(hash !== undefined ? { hash } : {}),
 		};
 	}
 
@@ -169,11 +172,13 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		containerEl.empty();
 
-		new Setting(containerEl).setName("Sync").setHeading();
+		// ── Account ─────────────────────────────────────────────────────────
+
+		new Setting(containerEl).setName("Account").setHeading();
 
 		new Setting(containerEl)
 			.setName("Email")
-			.setDesc("Account email.")
+			.setDesc("Your filen.io account email.")
 			.addText((text) =>
 				text
 					.setValue(this.plugin.settings.email)
@@ -185,11 +190,15 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Password")
-			.setDesc(this.plugin.hasSavedAuth() ? "Saved auth active. Only needed to re-auth." : "Needed once to save auth.")
+			.setDesc(
+				this.plugin.hasSavedAuth()
+					? "Credentials saved. Re-enter only to sign in to a different account."
+					: "Enter once to authenticate. Credentials are saved locally after first sync.",
+			)
 			.addText((text) => {
 				text.inputEl.type = "password";
 				text
-					.setPlaceholder(this.plugin.hasSessionPassword() ? "Password set" : "Password")
+					.setPlaceholder(this.plugin.hasSessionPassword() ? "••••••••" : "Password")
 					.onChange((value) => {
 						this.plugin.setSessionPassword(value);
 					});
@@ -197,7 +206,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Two-factor code")
-			.setDesc("Optional. Needed only when re-auth requires it.")
+			.setDesc("Only needed if your account has 2FA enabled.")
 			.addText((text) =>
 				text
 					.setPlaceholder("123456")
@@ -206,9 +215,32 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		const hasSavedAuth = this.plugin.hasSavedAuth();
+		new Setting(containerEl)
+			.setName(hasSavedAuth ? "Signed in" : "Not signed in")
+			.setDesc(
+				hasSavedAuth
+					? `Signed in as ${this.plugin.settings.email}. Credentials stored in plugin data.`
+					: "Enter your email and password above, then run a sync to authenticate.",
+			)
+			.addButton((button) =>
+				button
+					.setButtonText("Sign out")
+					.setWarning()
+					.setDisabled(!hasSavedAuth)
+					.onClick(async () => {
+						await this.plugin.clearSavedAuth();
+						this.display();
+					}),
+			);
+
+		// ── Advanced ─────────────────────────────────────────────────────────
+
+		new Setting(containerEl).setName("Advanced").setHeading();
+
 		new Setting(containerEl)
 			.setName("Remote folder")
-			.setDesc("Folder used for journal files.")
+			.setDesc("Filen folder where journal files are stored. Change only when syncing multiple separate vaults.")
 			.addText((text) =>
 				text
 					.setPlaceholder(DEFAULT_REMOTE_ROOT)
@@ -220,8 +252,8 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
-			.setName("Vault")
-			.setDesc("Stored in remote status metadata.")
+			.setName("Vault name")
+			.setDesc("Label stored in the remote sync log to identify this vault.")
 			.addText((text) =>
 				text
 					.setValue(this.plugin.settings.vaultName)
@@ -231,16 +263,30 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		// ── Actions ──────────────────────────────────────────────────────────
+
+		new Setting(containerEl).setName("Actions").setHeading();
+
 		new Setting(containerEl)
-			.setName("Saved auth")
-			.setDesc(this.plugin.hasSavedAuth() ? "Stored locally in plugin data." : "No saved auth.")
+			.setName("Test connection")
+			.setDesc("Verify credentials and remote folder are reachable.")
 			.addButton((button) =>
 				button
-					.setButtonText("Clear")
-					.setDisabled(!this.plugin.hasSavedAuth())
-					.onClick(async () => {
-						await this.plugin.clearSavedAuth();
-						this.display();
+					.setButtonText("Test")
+					.onClick(() => {
+						void this.plugin.testConnection();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Sync now")
+			.setDesc("Pull remote changes then push local changes.")
+			.addButton((button) =>
+				button
+					.setButtonText("Sync")
+					.setCta()
+					.onClick(() => {
+						void this.plugin.syncNow();
 					}),
 			);
 	}
