@@ -26,6 +26,7 @@
 	},
 	"dependencies": {
 		"@filen/sdk": "^0.3.12",
+		"localforage": "^1.10.0",
 		"obsidian": "latest"
 	}
 }

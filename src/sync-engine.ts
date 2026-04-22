@@ -1,11 +1,13 @@
 import { App, normalizePath, TFile } from "obsidian";
 import { Bytes } from "./bytes";
+import type { SyncDb } from "./db";
 import type { RemoteJournalStore } from "./filen-store";
 import { Journal, JournalEntry, JournalEnvelope } from "./journal";
 import type { FilenSyncSettings, SyncedFileRecord } from "./settings";
 
 type SyncEngineConfig = {
 	app: App;
+	db: SyncDb;
 	settings: FilenSyncSettings;
 	saveSettings: () => Promise<void>;
 	remote: RemoteJournalStore;
@@ -18,7 +20,8 @@ type PushResult = {
 
 type LocalChangeSet = {
 	entries: JournalEntry[];
-	files: Record<string, SyncedFileRecord>;
+	toSet: Map<string, SyncedFileRecord>;
+	toDelete: string[];
 };
 
 type PullResult = {
@@ -64,7 +67,7 @@ export class SyncEngine {
 		};
 
 		await this.config.remote.writeFile(journalKey, await Journal.encode(envelope));
-		this.config.settings.state.files = changes.files;
+		await applyChangeSet(this.config.db, changes.toSet, changes.toDelete);
 		this.config.settings.state.sentJournalKeys = rememberSentKey(
 			this.config.settings.state.sentJournalKeys,
 			journalKey,
@@ -113,11 +116,16 @@ export class SyncEngine {
 			}
 		}
 
+		// Load all known file records from DB once so we don't hit IndexedDB per-file.
+		const knownFiles = await this.config.db.getAllFiles();
+
 		const entries: JournalEntry[] = [];
-		const files = { ...this.config.settings.state.files };
+		const toSet = new Map<string, SyncedFileRecord>();
+		const toDelete: string[] = [];
+
 		for (const [path, file] of currentFiles) {
 			const current = toSyncedFileRecord(file);
-			const previous = this.config.settings.state.files[path];
+			const previous = knownFiles.get(path);
 
 			// Fast path: metadata unchanged — no need to read content.
 			if (previous !== undefined && sameFileRecord(previous, current)) {
@@ -129,8 +137,8 @@ export class SyncEngine {
 
 			// Content unchanged despite metadata shift — skip to avoid redundant upload.
 			if (previous?.hash !== undefined && previous.hash === hash) {
-				// Update metadata in state so the fast path triggers next time.
-				files[path] = { ...current, hash };
+				// Queue metadata update so the fast path triggers next time.
+				toSet.set(path, { ...current, hash });
 				continue;
 			}
 
@@ -143,23 +151,19 @@ export class SyncEngine {
 				hash,
 				contentBase64: Bytes.toBase64(content),
 			});
-			files[path] = { ...current, hash };
+			toSet.set(path, { ...current, hash });
 		}
 
-		for (const path of Object.keys(this.config.settings.state.files)) {
+		for (const path of knownFiles.keys()) {
 			if (currentFiles.has(path)) {
 				continue;
 			}
 
-			entries.push({
-				type: "delete",
-				path,
-				deletedAt: Date.now(),
-			});
-			delete files[path];
+			entries.push({ type: "delete", path, deletedAt: Date.now() });
+			toDelete.push(path);
 		}
 
-		return { entries, files };
+		return { entries, toSet, toDelete };
 	}
 
 	private async applyRemoteEntry(
@@ -168,14 +172,14 @@ export class SyncEngine {
 		remoteCreatedAt: number,
 	): Promise<PullResult> {
 		const localFile = this.getFile(entry.path);
-		const previous = this.config.settings.state.files[entry.path];
+		const previous = await this.config.db.getFile(entry.path);
 		const localChanged = localFile !== null && previous !== undefined
 			? !sameFileRecord(toSyncedFileRecord(localFile), previous)
 			: localFile !== null && previous === undefined;
 
 		if (entry.type === "delete") {
 			if (localFile === null) {
-				delete this.config.settings.state.files[entry.path];
+				await this.config.db.deleteFile(entry.path);
 				return { applied: 0, conflicts: 0 };
 			}
 
@@ -185,7 +189,7 @@ export class SyncEngine {
 			}
 
 			await this.config.app.fileManager.trashFile(localFile);
-			delete this.config.settings.state.files[entry.path];
+			await this.config.db.deleteFile(entry.path);
 			return { applied: 1, conflicts: 0 };
 		}
 
@@ -194,13 +198,13 @@ export class SyncEngine {
 		}
 
 		await this.writeFileEntry(entry);
-		this.config.settings.state.files[entry.path] = {
+		await this.config.db.setFile(entry.path, {
 			path: entry.path,
 			mtime: entry.mtime,
 			ctime: entry.ctime,
 			size: entry.size,
 			...(entry.hash !== undefined ? { hash: entry.hash } : {}),
-		};
+		});
 
 		return { applied: 1, conflicts: localFile !== null && localChanged ? 1 : 0 };
 	}
@@ -296,3 +300,13 @@ const safePathSegment = (value: string): string =>
 	value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 
 const rememberSentKey = (keys: string[], key: string): string[] => [...keys, key].slice(-200);
+
+const applyChangeSet = (
+	db: SyncDb,
+	toSet: Map<string, SyncedFileRecord>,
+	toDelete: string[],
+): Promise<void[]> =>
+	Promise.all([
+		...[...toSet.entries()].map(([path, record]) => db.setFile(path, record)),
+		...toDelete.map((path) => db.deleteFile(path)),
+	]);

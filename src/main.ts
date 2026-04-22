@@ -1,10 +1,12 @@
 import { Notice, Plugin } from "obsidian";
-import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
+import { SyncDb } from "./db";
 import { FilenJournalStore } from "./filen-store";
+import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
 import { SyncEngine } from "./sync-engine";
 
 export default class FilenSyncPlugin extends Plugin {
 	settings: FilenSyncSettings;
+	private db: SyncDb = SyncDb.open("__init__"); // replaced in onload
 	private sessionPassword = "";
 	private sessionTwoFactorCode = "";
 	private statusBarItemEl: HTMLElement | null = null;
@@ -12,6 +14,7 @@ export default class FilenSyncPlugin extends Plugin {
 	private isSyncing = false;
 
 	async onload() {
+		this.db = SyncDb.open(this.app.vault.getName());
 		await this.loadSettings();
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.setStatus("Idle");
@@ -90,6 +93,7 @@ export default class FilenSyncPlugin extends Plugin {
 	async loadSettings() {
 		const saved: unknown = await this.loadData();
 		this.settings = FilenSyncSettings.fromSaved(saved);
+
 		if (this.settings.deviceId.length === 0) {
 			this.settings.deviceId = crypto.randomUUID();
 			await this.saveSettings();
@@ -186,6 +190,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 			this.syncEngine = new SyncEngine({
 				app: this.app,
+				db: this.db,
 				settings: this.settings,
 				saveSettings: () => this.saveSettings(),
 				remote: store,

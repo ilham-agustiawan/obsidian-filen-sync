@@ -12,7 +12,6 @@ export type SyncedFileRecord = {
 export type SyncState = {
 	lastPulledKey: string;
 	sentJournalKeys: string[];
-	files: Record<string, SyncedFileRecord>;
 };
 
 export type FilenAuth = {
@@ -46,7 +45,6 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	state: {
 		lastPulledKey: "",
 		sentJournalKeys: [],
-		files: {},
 	},
 };
 
@@ -70,31 +68,6 @@ const readAuthVersion = (value: unknown): 1 | 2 | 3 | null => {
 	return null;
 };
 
-const readSyncedFiles = (value: unknown): Record<string, SyncedFileRecord> => {
-	if (!isRecord(value)) {
-		return {};
-	}
-
-	const files: Record<string, SyncedFileRecord> = {};
-	for (const [path, rawRecord] of Object.entries(value)) {
-		if (!isRecord(rawRecord)) {
-			continue;
-		}
-
-		const recordPath = readString(rawRecord.path, path);
-		const hash = typeof rawRecord.hash === "string" ? rawRecord.hash : undefined;
-		files[path] = {
-			path: recordPath,
-			mtime: readNumber(rawRecord.mtime, 0),
-			ctime: readNumber(rawRecord.ctime, 0),
-			size: readNumber(rawRecord.size, 0),
-			...(hash !== undefined ? { hash } : {}),
-		};
-	}
-
-	return files;
-};
-
 const readSyncState = (value: unknown): SyncState => {
 	if (!isRecord(value)) {
 		return DEFAULT_SETTINGS.state;
@@ -103,7 +76,6 @@ const readSyncState = (value: unknown): SyncState => {
 	return {
 		lastPulledKey: readString(value.lastPulledKey, ""),
 		sentJournalKeys: readStringArray(value.sentJournalKeys),
-		files: readSyncedFiles(value.files),
 	};
 };
 
@@ -149,7 +121,7 @@ const readFilenAuth = (value: unknown): FilenAuth | null => {
 export const FilenSyncSettings = {
 	fromSaved(value: unknown): FilenSyncSettings {
 		if (!isRecord(value)) {
-			return { ...DEFAULT_SETTINGS, state: { ...DEFAULT_SETTINGS.state, files: {} }, auth: null };
+			return { ...DEFAULT_SETTINGS };
 		}
 
 		return {
