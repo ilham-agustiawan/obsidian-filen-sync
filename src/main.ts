@@ -1,99 +1,183 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Notice, Plugin } from "obsidian";
+import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
+import { FilenJournalStore } from "./filen-store";
+import { SyncEngine } from "./sync-engine";
 
-// Remember to rename these classes and interfaces!
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class FilenSyncPlugin extends Plugin {
+	settings: FilenSyncSettings;
+	private sessionPassword = "";
+	private sessionTwoFactorCode = "";
+	private statusBarItemEl: HTMLElement | null = null;
+	private syncEngine: SyncEngine | null = null;
 
 	async onload() {
 		await this.loadSettings();
+		this.statusBarItemEl = this.addStatusBarItem();
+		this.setStatus("Idle");
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		this.addRibbonIcon("sync", "Sync with filen", () => {
+			void this.syncNow();
 		});
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
-
-		// This adds a simple command that can be triggered anywhere
 		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
+			id: "sync-now",
+			name: "Sync now",
 			callback: () => {
-				new SampleModal(this.app).open();
-			}
+				void this.syncNow();
+			},
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
+
 		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
+			id: "push-local-changes",
+			name: "Push local changes",
+			callback: () => {
+				void this.pushLocalChanges();
+			},
 		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
+
 		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
-				return false;
-			}
+			id: "pull-remote-changes",
+			name: "Pull remote changes",
+			callback: () => {
+				void this.pullRemoteChanges();
+			},
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
+		this.addCommand({
+			id: "test-filen-connection",
+			name: "Test filen connection",
+			callback: () => {
+				void this.testConnection();
+			},
 		});
 
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
+		this.addSettingTab(new FilenSyncSettingTab(this.app, this));
 	}
 
 	onunload() {
+		this.syncEngine?.close();
+		this.syncEngine = null;
+	}
+
+	setSessionPassword(value: string) {
+		this.sessionPassword = value;
+		this.syncEngine?.close();
+		this.syncEngine = null;
+	}
+
+	setSessionTwoFactorCode(value: string) {
+		this.sessionTwoFactorCode = value;
+		this.syncEngine?.close();
+		this.syncEngine = null;
+	}
+
+	hasSessionPassword(): boolean {
+		return this.sessionPassword.length > 0;
+	}
+
+	hasSavedAuth(): boolean {
+		return this.settings.auth !== null;
+	}
+
+	async clearSavedAuth() {
+		this.syncEngine?.close();
+		this.syncEngine = null;
+		this.settings.auth = null;
+		await this.saveSettings();
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+		const saved: unknown = await this.loadData();
+		this.settings = FilenSyncSettings.fromSaved(saved);
+		if (this.settings.deviceId.length === 0) {
+			this.settings.deviceId = crypto.randomUUID();
+			await this.saveSettings();
+		}
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
 	}
-}
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+	private async syncNow() {
+		await this.runSyncTask("Sync", async (engine) => {
+			const pulled = await engine.pull();
+			const pushed = await engine.push();
+			return `pulled ${pulled.applied}, conflicts ${pulled.conflicts}, pushed ${pushed.entries}`;
+		});
 	}
 
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+	private async pushLocalChanges() {
+		await this.runSyncTask("Push", async (engine) => {
+			const result = await engine.push();
+			return `pushed ${result.entries}`;
+		});
 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	private async pullRemoteChanges() {
+		await this.runSyncTask("Pull", async (engine) => {
+			const result = await engine.pull();
+			return `pulled ${result.applied}, conflicts ${result.conflicts}`;
+		});
+	}
+
+	private async testConnection() {
+		await this.runSyncTask("Connection", async (engine) => {
+			await engine.testRemote();
+			return "ok";
+		});
+	}
+
+	private async runSyncTask(label: string, task: (engine: SyncEngine) => Promise<string>) {
+		try {
+			this.setStatus(`${label}...`);
+			const engine = this.getSyncEngine();
+			const result = await task(engine);
+			this.setStatus(result);
+			new Notice(`${label}: ${result}`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			this.setStatus(`${label} failed`);
+			console.error(`${label} failed`, error);
+			new Notice(`${label} failed: ${message}`);
+		}
+	}
+
+	private getSyncEngine(): SyncEngine {
+		if (this.settings.email.length === 0) {
+			throw new Error("Filen email missing. Add it in plugin settings.");
+		}
+
+		if (this.settings.auth === null && this.sessionPassword.length === 0) {
+			throw new Error("Filen password missing. Enter it once in plugin settings.");
+		}
+
+		if (this.syncEngine === null) {
+			const store = new FilenJournalStore({
+				email: this.settings.email,
+				password: this.sessionPassword,
+				twoFactorCode: this.sessionTwoFactorCode,
+				remoteRoot: this.settings.remoteRoot,
+				auth: this.settings.auth,
+				saveAuth: async (auth) => {
+					this.settings.auth = auth;
+					this.settings.email = auth.email;
+					await this.saveSettings();
+				},
+			});
+
+			this.syncEngine = new SyncEngine({
+				app: this.app,
+				settings: this.settings,
+				saveSettings: () => this.saveSettings(),
+				remote: store,
+			});
+		}
+
+		return this.syncEngine;
+	}
+
+	private setStatus(value: string) {
+		this.statusBarItemEl?.setText(`Filen sync: ${value}`);
 	}
 }
