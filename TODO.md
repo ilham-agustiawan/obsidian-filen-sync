@@ -35,7 +35,7 @@ Current implementation: direct Filen folder mirror.
 - [x] Debounced vault modify trigger
 - [x] Remote walk performance: reduce `stat()` calls if SDK exposes metadata in listing
 - [ ] Conflict strategy setting: keep newer, keep local, keep remote
-- [ ] Safer local deletion path: trash local where Obsidian adapter supports it
+- [x] Safer local deletion path: use Obsidian file manager trash preference
 - [ ] Mobile runtime verification
 
 ## Deferred

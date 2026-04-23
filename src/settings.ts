@@ -27,6 +27,7 @@ export type FilenSyncSettings = {
 	vaultName: string;
 	auth: FilenAuth | null;
 	syncOnSave: boolean;
+	syncOnSaveDelaySeconds: number;
 	syncIntervalMinutes: number;
 	syncStartupDelaySeconds: number;
 };
@@ -40,6 +41,7 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	vaultName: "default",
 	auth: null,
 	syncOnSave: false,
+	syncOnSaveDelaySeconds: 5,
 	syncIntervalMinutes: 0,
 	syncStartupDelaySeconds: 0,
 };
@@ -55,6 +57,9 @@ const readBoolean = (value: unknown, fallback: boolean): boolean =>
 
 const readNumber = (value: unknown, fallback: number): number =>
 	typeof value === "number" && Number.isFinite(value) ? value : fallback;
+
+const clampNumber = (value: number, min: number, max: number): number =>
+	Math.min(max, Math.max(min, value));
 
 const readStringArray = (value: unknown): string[] =>
 	Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
@@ -119,6 +124,11 @@ export const FilenSyncSettings = {
 			vaultName: readString(value.vaultName, DEFAULT_SETTINGS.vaultName),
 			auth: readFilenAuth(value.auth),
 			syncOnSave: readBoolean(value.syncOnSave, DEFAULT_SETTINGS.syncOnSave),
+			syncOnSaveDelaySeconds: clampNumber(
+				readNumber(value.syncOnSaveDelaySeconds, DEFAULT_SETTINGS.syncOnSaveDelaySeconds),
+				1,
+				30,
+			),
 			syncIntervalMinutes: readNumber(value.syncIntervalMinutes, DEFAULT_SETTINGS.syncIntervalMinutes),
 			syncStartupDelaySeconds: readNumber(value.syncStartupDelaySeconds, DEFAULT_SETTINGS.syncStartupDelaySeconds),
 		};
@@ -231,7 +241,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sync on file save")
-			.setDesc("Trigger a bidirectional sync 5 seconds after the last vault change.")
+			.setDesc("Trigger a bidirectional sync after the active file changes.")
 			.addToggle((toggle) =>
 				toggle
 					.setValue(this.plugin.settings.syncOnSave)
@@ -242,11 +252,28 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		const delaySetting = new Setting(containerEl);
+		delaySetting
+			.setName(`Sync on save delay (${this.plugin.settings.syncOnSaveDelaySeconds} sec)`)
+			.setDesc("Wait this many seconds after the active file changes before syncing.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(1, 30, 1)
+					.setValue(this.plugin.settings.syncOnSaveDelaySeconds)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						delaySetting.setName(`Sync on save delay (${value} sec)`);
+						this.plugin.settings.syncOnSaveDelaySeconds = value;
+						await this.plugin.saveSettings();
+						this.plugin.refreshAutoSync();
+					}),
+			);
+
 		const formatInterval = (n: number) => (n === 0 ? "off" : `${n} min`);
 		const intervalSetting = new Setting(containerEl);
 		intervalSetting
 			.setName(`Sync interval (${formatInterval(this.plugin.settings.syncIntervalMinutes)})`)
-			.setDesc("Automatically sync in the background every N minutes. 0 to disable.")
+			.setDesc("Automatically sync in the background every set number of minutes. 0 to disable.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 60, 1)
@@ -262,7 +289,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Startup sync delay (seconds)")
-			.setDesc("Sync once N seconds after Obsidian loads. 0 to disable. Takes effect on next restart.")
+			.setDesc("Sync once after this many seconds after Obsidian loads. 0 to disable. Takes effect on next restart.")
 			.addText((text) =>
 				text
 					.setPlaceholder("0")

@@ -46,7 +46,7 @@ If your plugin does not need CSS, delete this file.
 
 .filen-sync-progress-bar {
 	height: 100%;
-	width: 0%;
+	width: var(--filen-sync-progress-width, 0%);
 	border-radius: inherit;
 	background: var(--interactive-accent);
 	transition: width 160ms linear;
@@ -264,4 +264,39 @@ If your plugin does not need CSS, delete this file.
 	.filen-sync-version-actions {
 		width: 100%;
 	}
+}
+
+.filen-sync-preview-modal {
+	width: min(860px, calc(100vw - 32px));
+	height: min(80vh, 800px);
+}
+
+.filen-sync-preview-modal .modal-content {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
+	height: 100%;
+	overflow: hidden;
+}
+
+.filen-sync-preview-header {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	flex-shrink: 0;
+}
+
+.filen-sync-preview-body {
+	flex: 1;
+	overflow: auto;
+	padding: 16px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-primary);
+}
+
+.filen-sync-preview-binary {
+	color: var(--text-muted);
+	font-style: italic;
+	padding: 16px;
 }

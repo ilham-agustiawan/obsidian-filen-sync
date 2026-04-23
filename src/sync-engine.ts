@@ -85,12 +85,19 @@ export class SyncEngine {
 		onProgress?: (progress: SyncProgress) => void,
 	): Promise<SyncResult> {
 		await this.ensureRemote();
+		onProgress?.(scanProgress(1, "Vault and Filen", "Scanning vault and Filen"));
 		const [local, remote, prev] = await Promise.all([
 			this.walkLocal(),
 			this.walkRemote(),
 			this.config.db.getAllFiles(),
 		]);
+		onProgress?.(scanProgress(2, "Sync database", "Reading previous sync state"));
 		const entries = this.ensemble(local, remote, prev);
+		onProgress?.(scanProgress(
+			3,
+			"Change plan",
+			prev.size === 0 ? "Initial sync: preparing files" : "Sync: preparing changes",
+		));
 
 		let applied = 0;
 		let conflicts = 0;
@@ -174,7 +181,7 @@ export class SyncEngine {
 	private async walkRemote(): Promise<Map<string, RemoteEntry>> {
 		const entries = new Map<string, RemoteEntry>();
 		for (const entry of await this.config.remote.walk()) {
-			if (shouldSkipPath(entry.path, ".obsidian")) {
+			if (shouldSkipPath(entry.path, this.config.app.vault.configDir)) {
 				continue;
 			}
 
@@ -433,7 +440,7 @@ export class SyncEngine {
 	private async deleteLocal(path: string): Promise<void> {
 		const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
 		if (file === null) return;
-		await this.config.app.vault.trash(file, true);
+		await this.config.app.fileManager.trashFile(file);
 	}
 
 	private async upsertPrev(record: PrevRecord): Promise<void> {
@@ -471,6 +478,17 @@ const syncModeDetail = (mode: SyncMode): string => {
 			return "Download changed remote files only";
 	}
 };
+
+const scanProgress = (current: number, path: string, detail: string): SyncProgress => ({
+	current,
+	total: 3,
+	path,
+	phase: "scan",
+	state: "done",
+	operation: "no-change",
+	detail,
+	at: Date.now(),
+});
 
 const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
 	const digest = await crypto.subtle.digest("SHA-256", bytes);

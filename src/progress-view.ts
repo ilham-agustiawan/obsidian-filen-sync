@@ -73,9 +73,11 @@ export class FilenSyncProgressView extends ItemView {
 		const barWrap = containerEl.createDiv({ cls: "filen-sync-progress-bar-wrap" });
 		const bar = barWrap.createDiv({ cls: "filen-sync-progress-bar" });
 		if (progress !== null && progress.total > 0) {
-			bar.style.width = `${Math.max(0, Math.min(100, (progress.current / progress.total) * 100))}%`;
+			bar.setCssProps({
+				"--filen-sync-progress-width": `${Math.max(0, Math.min(100, (progress.current / progress.total) * 100))}%`,
+			});
 		} else {
-			bar.style.width = "0%";
+			bar.setCssProps({ "--filen-sync-progress-width": "0%" });
 		}
 
 		const body = containerEl.createDiv({ cls: "filen-sync-progress-body" });

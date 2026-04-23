@@ -23,7 +23,7 @@ export const SyncDb = {
 } as const;
 
 class LocalForageDb implements SyncDb {
-	constructor(private readonly store: LocalForage) {}
+	constructor(private readonly store: ReturnType<typeof localforage.createInstance>) {}
 
 	async getFile(path: string): Promise<SyncedFileRecord | undefined> {
 		const record = await this.store.getItem<SyncedFileRecord>(path);

@@ -1,5 +1,4 @@
 import { FilenSDK } from "@filen/sdk";
-import { Readable } from "stream";
 import type { FilenAuth } from "./settings";
 
 export type RemoteEntry = {
@@ -25,6 +24,7 @@ export type RemoteFs = {
 	rm(path: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
 	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
+	readFileVersion(version: RemoteFileVersion): Promise<Uint8Array>;
 	restoreFileVersion(path: string, versionUuid: string): Promise<void>;
 	deleteFileVersion(versionUuid: string): Promise<void>;
 	checkConnect(): Promise<void>;
@@ -48,6 +48,40 @@ export class FilenRemoteFs implements RemoteFs {
 	async walk(): Promise<RemoteEntry[]> {
 		const rootUuid = await this.getParentUuid("");
 		const cloud = (await this.getClient()).cloud();
+
+		try {
+			return this.sortEntries(await this.walkTree(rootUuid, cloud));
+		} catch {
+			return this.sortEntries(await this.walkRecursive(rootUuid, cloud));
+		}
+	}
+
+	private async walkTree(rootUuid: string, cloud: ReturnType<FilenSDK["cloud"]>): Promise<RemoteEntry[]> {
+		const tree = await cloud.getDirectoryTree({ uuid: rootUuid, skipCache: true });
+		const entries: RemoteEntry[] = [];
+
+		for (const [treePath, item] of Object.entries(tree)) {
+			if (treePath === "/" || item.parent === "base") {
+				continue;
+			}
+
+			const path = treePath.startsWith("/") ? treePath.slice(1) : treePath;
+			if (path.length === 0) {
+				continue;
+			}
+
+			entries.push({
+				path,
+				mtime: item.lastModified,
+				size: item.size,
+				isDir: item.type === "directory",
+			});
+		}
+
+		return entries;
+	}
+
+	private async walkRecursive(rootUuid: string, cloud: ReturnType<FilenSDK["cloud"]>): Promise<RemoteEntry[]> {
 		const visited = new Set<string>([rootUuid]);
 
 		// Cap concurrent listDirectory calls to avoid hitting API rate limits.
@@ -93,7 +127,10 @@ export class FilenRemoteFs implements RemoteFs {
 			return entries.concat(...subResults);
 		};
 
-		const entries = await walkDir(rootUuid, "");
+		return walkDir(rootUuid, "");
+	}
+
+	private sortEntries(entries: RemoteEntry[]): RemoteEntry[] {
 		return entries.sort((left, right) => left.path.localeCompare(right.path));
 	}
 
@@ -103,22 +140,19 @@ export class FilenRemoteFs implements RemoteFs {
 		return new Uint8Array(content);
 	}
 
-	async writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void> {
+	async writeFile(path: string, bytes: Uint8Array, mtime: number, _ctime: number): Promise<void> {
 		const client = await this.getClient();
-		const fs = client.fs();
 		const normalized = normalizeRemotePath(path);
 		const parent = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
 		const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
 
 		const parentUuid = await this.getParentUuid(parent);
 
-		const source = Readable.from([bytes]);
-		await client.cloud().uploadLocalFileStream({
-			source,
+		const file = new File([bytes], fileName, { lastModified: mtime });
+		await client.cloud().uploadWebFile({
+			file,
 			parent: parentUuid,
 			name: fileName,
-			lastModified: mtime,
-			creation: ctime,
 		});
 		client.init(client.config);
 	}
@@ -142,14 +176,48 @@ export class FilenRemoteFs implements RemoteFs {
 		}
 
 		const response = await client.cloud().fileVersions({ uuid });
-		return response.versions.map((version) => ({
+		return response.versions
+			.filter((version) => version.uuid !== uuid)
+			.map((version) => ({
+				uuid: version.uuid,
+				version: version.version,
+				timestamp: normalizeRemoteTimestampMs(version.timestamp),
+				bucket: version.bucket,
+				region: version.region,
+				chunks: version.chunks,
+			}));
+	}
+
+	async readFileVersion(version: RemoteFileVersion): Promise<Uint8Array> {
+		const client = await this.getClient();
+		const file = await client.cloud().getFile({ uuid: version.uuid });
+		const stream = client.cloud().downloadFileToReadableStream({
 			uuid: version.uuid,
-			version: version.version,
-			timestamp: normalizeRemoteTimestampMs(version.timestamp),
 			bucket: version.bucket,
 			region: version.region,
+			version: file.version,
+			key: file.metadataDecrypted.key,
+			size: file.size,
 			chunks: version.chunks,
-		}));
+		});
+		const reader = stream.getReader();
+		const chunks: Uint8Array[] = [];
+		let byteLength = 0;
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value instanceof Uint8Array && value.byteLength > 0) {
+				chunks.push(value);
+				byteLength += value.byteLength;
+			}
+		}
+		const content = new Uint8Array(byteLength);
+		let offset = 0;
+		for (const chunk of chunks) {
+			content.set(chunk, offset);
+			offset += chunk.byteLength;
+		}
+		return content;
 	}
 
 	async restoreFileVersion(path: string, versionUuid: string): Promise<void> {

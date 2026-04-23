@@ -1,4 +1,4 @@
-import { type EventRef, Menu, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
+import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
 import { SyncDb } from "./db";
 import { FilenRemoteFs } from "./fs-remote";
 import { FileVersionModal } from "./file-version-modal";
@@ -19,6 +19,9 @@ export default class FilenSyncPlugin extends Plugin {
 	private intervalId: number | null = null;
 	private startupTimerId: number | null = null;
 	private vaultEventRefs: EventRef[] = [];
+	private workspaceEventRefs: EventRef[] = [];
+	private pendingAutoSync = false;
+	private lastActiveFilePath: string | null = null;
 	private syncProgress: SyncProgress | null = null;
 	private syncViewState: SyncViewState = {
 		label: "Idle",
@@ -243,22 +246,23 @@ export default class FilenSyncPlugin extends Plugin {
 			if (!silent) new Notice(`${label} failed: ${message}`);
 		} finally {
 			this.isSyncing = false;
+			this.runPendingAutoSync();
 		}
 	}
 
 	setupAutoSync(): void {
-		const { syncOnSave, syncIntervalMinutes, syncStartupDelaySeconds } = this.settings;
+		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes, syncStartupDelaySeconds } = this.settings;
+		const activeFile = this.app.workspace.getActiveFile();
+		this.lastActiveFilePath = activeFile?.path ?? null;
 
 		if (syncOnSave) {
-			const handler = () => {
-				// Skip scheduling when a sync is already running — it will capture
-				// any changes written during its own run, including conflict copies.
-				if (this.isSyncing) return;
-				if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
-				this.debounceTimer = window.setTimeout(() => {
-					this.debounceTimer = null;
-					void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
-				}, 5000);
+			this.workspaceEventRefs.push(this.app.workspace.on("file-open", (file) => {
+				this.lastActiveFilePath = file?.path ?? null;
+			}));
+
+			const handler = (file: TAbstractFile, oldPath?: string) => {
+				if (!this.isActiveFileEvent(file, oldPath)) return;
+				this.scheduleAutoSync(syncOnSaveDelaySeconds * 1000);
 			};
 			this.vaultEventRefs.push(this.app.vault.on("modify", handler));
 			this.vaultEventRefs.push(this.app.vault.on("create", handler));
@@ -268,14 +272,14 @@ export default class FilenSyncPlugin extends Plugin {
 
 		if (syncIntervalMinutes > 0) {
 			this.intervalId = window.setInterval(() => {
-				void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
+				this.requestAutoSync();
 			}, syncIntervalMinutes * 60 * 1000);
 		}
 
 		if (syncStartupDelaySeconds > 0) {
 			this.startupTimerId = window.setTimeout(() => {
 				this.startupTimerId = null;
-				void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
+				this.requestAutoSync();
 			}, syncStartupDelaySeconds * 1000);
 		}
 	}
@@ -295,6 +299,9 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 		for (const ref of this.vaultEventRefs) this.app.vault.offref(ref);
 		this.vaultEventRefs = [];
+		for (const ref of this.workspaceEventRefs) this.app.workspace.offref(ref);
+		this.workspaceEventRefs = [];
+		this.pendingAutoSync = false;
 	}
 
 	refreshAutoSync(): void {
@@ -326,6 +333,48 @@ export default class FilenSyncPlugin extends Plugin {
 		if (result.applied > 0) parts.push(`applied ${result.applied}`);
 		if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
 		return parts.join(", ");
+	}
+
+	private scheduleAutoSync(delayMs: number): void {
+		if (this.isSyncing) {
+			this.pendingAutoSync = true;
+			return;
+		}
+
+		if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
+		this.debounceTimer = window.setTimeout(() => {
+			this.debounceTimer = null;
+			this.requestAutoSync();
+		}, delayMs);
+	}
+
+	private requestAutoSync(): void {
+		if (!this.hasAutoSyncEnabled()) return;
+
+		if (this.isSyncing) {
+			this.pendingAutoSync = true;
+			return;
+		}
+
+		void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
+	}
+
+	private runPendingAutoSync(): void {
+		if (!this.pendingAutoSync || !this.hasAutoSyncEnabled()) return;
+
+		this.pendingAutoSync = false;
+		this.requestAutoSync();
+	}
+
+	private hasAutoSyncEnabled(): boolean {
+		return this.settings.syncOnSave || this.settings.syncIntervalMinutes > 0 || this.settings.syncStartupDelaySeconds > 0;
+	}
+
+	private isActiveFileEvent(file: TAbstractFile, oldPath?: string): boolean {
+		const activePath = this.app.workspace.getActiveFile()?.path ?? this.lastActiveFilePath;
+		if (activePath === null) return false;
+
+		return file.path === activePath || oldPath === activePath;
 	}
 
 	private getSyncEngine(): SyncEngine {
@@ -373,6 +422,12 @@ export default class FilenSyncPlugin extends Plugin {
 			at: progress.at,
 			active: progress.state === "active",
 		});
+		if (progress.phase === "scan") {
+			this.updateViewState(label, progress.detail, progress, rows);
+			this.setStatus(`${label}: ${progress.detail}`);
+			return;
+		}
+
 		this.updateViewState(label, `File ${progress.current} of ${progress.total}`, progress, rows);
 		this.setStatus(`${label} ${progress.current}/${progress.total}: ${progress.path}`);
 	}
@@ -418,12 +473,21 @@ export default class FilenSyncPlugin extends Plugin {
 			remote,
 			path: file.path,
 			onRestored: async () => {
-				await this.syncNow();
+				await this.db.deleteFile(file.path);
+				await this.pullRemoteChanges();
 			},
-			confirmRestore: async (version) =>
-				window.confirm(`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? Current content will be replaced.`),
-			confirmDelete: async (version) =>
-				window.confirm(`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? This cannot be undone.`),
+			confirmRestore: async (version) => confirmAction(
+				this.app,
+				"Restore file version",
+				`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? Current content will be replaced.`,
+				"Restore",
+			),
+			confirmDelete: async (version) => confirmAction(
+				this.app,
+				"Delete file version",
+				`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? This cannot be undone.`,
+				"Delete",
+			),
 		});
 		modal.open();
 	}
@@ -459,17 +523,76 @@ export default class FilenSyncPlugin extends Plugin {
 			remote,
 			path,
 			onRestored: async () => {
-				await this.syncNow();
+				await this.db.deleteFile(path);
+				await this.pullRemoteChanges();
 			},
-			confirmRestore: async (version) =>
-				window.confirm(`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${path}? Current content will be replaced.`),
-			confirmDelete: async (version) =>
-				window.confirm(`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${path}? This cannot be undone.`),
+			confirmRestore: async (version) => confirmAction(
+				this.app,
+				"Restore file version",
+				`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${path}? Current content will be replaced.`,
+				"Restore",
+			),
+			confirmDelete: async (version) => confirmAction(
+				this.app,
+				"Delete file version",
+				`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${path}? This cannot be undone.`,
+				"Delete",
+			),
 		});
 		modal.open();
 	}
 
 	private setStatus(value: string) {
 		this.statusBarItemEl?.setText(`Filen sync: ${value}`);
+	}
+}
+
+const confirmAction = (app: App, title: string, message: string, confirmText: string): Promise<boolean> =>
+	new Promise((resolve) => {
+		new ConfirmActionModal(app, title, message, confirmText, resolve).open();
+	});
+
+class ConfirmActionModal extends Modal {
+	private resolved = false;
+
+	constructor(
+		app: App,
+		private readonly title: string,
+		private readonly message: string,
+		private readonly confirmText: string,
+		private readonly resolve: (confirmed: boolean) => void,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.empty();
+		this.contentEl.createEl("h2", { text: this.title });
+		this.contentEl.createEl("p", { text: this.message });
+
+		const actions = this.contentEl.createDiv({ cls: "modal-button-container" });
+		const cancelButton = actions.createEl("button", { text: "Cancel" });
+		cancelButton.addEventListener("click", () => {
+			this.finish(false);
+		});
+
+		const confirmButton = actions.createEl("button", { text: this.confirmText });
+		confirmButton.addClass("mod-warning");
+		confirmButton.addEventListener("click", () => {
+			this.finish(true);
+		});
+	}
+
+	onClose(): void {
+		if (!this.resolved) {
+			this.finish(false);
+		}
+	}
+
+	private finish(confirmed: boolean): void {
+		if (this.resolved) return;
+		this.resolved = true;
+		this.resolve(confirmed);
+		this.close();
 	}
 }
