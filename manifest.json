@@ -3,7 +3,7 @@
 	"name": "Filen Sync",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Manual Obsidian vault sync through Filen journal files.",
+	"description": "Manual Obsidian vault sync through a Filen folder mirror.",
 	"author": "agustiawan",
 	"isDesktopOnly": false
 }

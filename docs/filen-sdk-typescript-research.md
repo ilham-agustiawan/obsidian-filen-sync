@@ -24,7 +24,7 @@ It exposes:
 - `filen.cloud()`: lower-level file/directory operations, UUID-based.
 - Other groups: notes, chats, contacts, crypto, user, API.
 
-For this plugin, prefer `filen.fs()` first. It maps better to journal files under one remote folder.
+For this plugin, prefer `filen.fs()` first. It maps better to a direct mirror under one remote folder.
 
 ## Install
 
@@ -45,13 +45,9 @@ Key runtime warning: browser use needs a bundler plus Node polyfills. Obsidian p
 
 SDK package license is `AGPLv3`.
 
-This repository currently uses `0-BSD` in `package.json`. Do not add `@filen/sdk` as a dependency until project licensing implications are accepted.
+This repository now uses `AGPL-3.0-only` because `@filen/sdk` is AGPLv3.
 
-Decision needed:
-
-- Use AGPL-compatible plugin licensing, or
-- avoid SDK dependency and use another integration path, or
-- get legal review before release.
+Before public release, confirm this license choice is acceptable for the plugin.
 
 ## SDK config
 
@@ -151,7 +147,7 @@ Important constraints:
 - `read` supports partial reads and is better for large files.
 - `cp` downloads then reuploads because Filen E2EE prevents server-side copy.
 
-For journal sync, whole-file `writeFile` and `readFile` are acceptable for MVP because journal files can be bounded. Add size limits before supporting large vaults.
+For direct mirror sync, whole-file `writeFile` and `readFile` are acceptable for MVP. Add size limits before supporting large vaults or large binary folders.
 
 ## Cloud API
 
@@ -193,12 +189,11 @@ export type FilenRemoteError =
 	| { type: "network"; message: string }
 	| { type: "unknown"; operation: string; message: string };
 
-export type RemoteJournalStore = {
-	ensureRoot(): Promise<Result<void, FilenRemoteError>>;
-	listFiles(after: string, limit: number): Promise<Result<string[], FilenRemoteError>>;
-	writeFile(key: string, bytes: Uint8Array): Promise<Result<void, FilenRemoteError>>;
-	readFile(key: string): Promise<Result<Uint8Array, FilenRemoteError>>;
-	deleteFile(key: string): Promise<Result<void, FilenRemoteError>>;
+export type RemoteFs = {
+	walk(): Promise<Result<RemoteEntry[], FilenRemoteError>>;
+	writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<Result<void, FilenRemoteError>>;
+	readFile(path: string): Promise<Result<Uint8Array, FilenRemoteError>>;
+	rm(path: string): Promise<Result<void, FilenRemoteError>>;
 };
 ```
 
@@ -209,15 +204,14 @@ Why:
 - AGPL dependency remains contained if integration must change.
 - Runtime polyfill issues stay local.
 
-## MVP remote layout
+## Current remote layout
 
 Use one remote folder:
 
 ```text
 /Apps/obsidian-filen-sync/<vault-id>/
-  _sync_parameters.json
-  _milestone.json
-  20260422T153000Z-<device-id>-<random>-docs.jsonl.gz
+  notes/example.md
+  assets/image.png
 ```
 
 Filen path rules to test:

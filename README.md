@@ -1,65 +1,174 @@
 # Filen Sync
 
-Manual Obsidian vault sync through Filen.
+Manual Obsidian vault sync through a Filen folder mirror.
+
+Filen Sync is an Obsidian community plugin for syncing vault files to a Filen
+folder. It uses a direct remote mirror, stores sync state locally, and keeps
+conflict copies when both local and remote files changed.
 
 ## Status
 
-MVP. Desktop and mobile target.
+MVP. Use with backups.
 
-Implemented:
+Targets desktop and mobile, but mobile runtime still needs verification.
+
+## Features
 
 - Filen login through `@filen/sdk`
-- Remote journal folder under `/Apps/obsidian-filen-sync/default`
-- Manual **Sync now**, **Push local changes**, **Pull remote changes**
-- Whole-file journal entries
-- Delete propagation
-- Conflict copies for local edits touched by remote changes
+- Saved Filen auth after first login
+- Session-only password and 2FA code
+- Manual bidirectional sync
+- Manual push-local and pull-remote modes
+- Sync progress view
+- Conflict copies for both-sides edits
+- Filen file version list, restore, and delete
+- Local previous-sync state in IndexedDB
+- SHA-256 content hash fallback for timestamp drift
 
-Not implemented yet:
+## Known limitations
 
-- Compression
-- Plugin-level E2EE
-- Continuous background sync
-- Chunking
-- Background sync
+- Delete propagation is not complete yet.
+- No auto-sync triggers.
+- No file filtering.
+- No rename detection; renames are delete + create.
+- No chunking or deduplication.
+- No plugin-level encryption beyond Filen account encryption.
 
-## Use
+## Requirements
 
-1. Install deps: `npm install`
-2. Build: `npm run build`
-3. Enable plugin in Obsidian desktop.
-4. Set Filen email, password, optional 2FA code, and remote folder.
-5. Run **Filen Sync: Sync now** from command palette.
+- Obsidian `0.15.0` or newer
+- Filen account
+- Node.js 18+ for development
+- npm
 
-Password and 2FA are used once to create saved Filen auth. Clear saved auth in settings to sign out.
+## Install
 
-## Deploy test vault
+### From source
+
+```bash
+npm install
+npm run build
+```
+
+Copy these files to your vault plugin folder:
+
+```text
+<vault>/.obsidian/plugins/obsidian-filen-sync/
+  main.js
+  manifest.json
+```
+
+Then enable **Filen Sync** in **Settings -> Community plugins**.
+
+## Setup
+
+1. Open **Settings -> Filen Sync**.
+2. Enter Filen email.
+3. Enter password and optional 2FA code.
+4. Keep the default remote folder, or set a custom one.
+5. Run **Test connection**.
+6. Run **Sync now**.
+
+Password and 2FA code are used only for the current Obsidian session. Saved
+Filen auth is stored in Obsidian plugin data. Use **Sign out** to clear it.
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| **Filen Sync: Sync now** | Compare local and remote. Apply changed side. Keep conflict copies. |
+| **Filen Sync: Push changed local files** | Upload local changes only. |
+| **Filen Sync: Pull changed remote files** | Download remote changes only. |
+| **Filen Sync: Test filen connection** | Verify auth and remote write/delete access. |
+| **Filen Sync: Open sync progress** | Show current or last sync rows. |
+| **Filen Sync: Open active file versions** | Manage Filen versions for active file. |
+
+## Remote layout
+
+Default remote root:
+
+```text
+/Apps/obsidian-filen-sync/default
+```
+
+Files are mirrored directly:
+
+```text
+/Apps/obsidian-filen-sync/default/
+  notes/example.md
+  assets/image.png
+```
+
+Plugin sync state stays local in IndexedDB.
+
+## Development
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run development build:
+
+```bash
+npm run dev
+```
+
+Run production build:
+
+```bash
+npm run build
+```
+
+Run lint:
+
+```bash
+npm run lint
+```
+
+Deploy to the default test vault:
 
 ```bash
 npm run deploy:test-vault
 ```
 
-Default vault:
-
-```text
-/Users/agustiawan/Developer/git/kepano-obsidian
-```
-
-Override:
+Override test vault:
 
 ```bash
 TEST_VAULT_PATH=/path/to/vault npm run deploy:test-vault
 ```
 
-## Remote layout
+## Release
 
-```text
-/Apps/obsidian-filen-sync/default/
-  _sync_parameters.json
-  _milestone.json
-  <timestamp>-<device-id>-<random>-docs.jsonl
+1. Update `manifest.json` and `versions.json`.
+2. Run `npm run build`.
+3. Create a GitHub release tagged with the exact plugin version, no leading `v`.
+4. Attach `manifest.json` and `main.js`.
+
+## Privacy
+
+This plugin talks to Filen only when you run a sync, push, pull, version, or
+connection-test action. It does not add telemetry.
+
+Vault file contents and paths are sent to Filen as needed for sync. Filen auth
+data is stored in Obsidian plugin data. Password and 2FA code are not persisted
+by this plugin.
+
+## Contributing
+
+Issues and pull requests are welcome. Keep changes small, typed, and covered by
+the smallest useful verification.
+
+Before submitting:
+
+```bash
+npm run build
+npm run lint
 ```
 
-## License note
+## License
 
-`@filen/sdk` is AGPL. This plugin is AGPL-3.0-only.
+AGPL-3.0-only.
+
+`@filen/sdk` is AGPL, so this plugin is AGPL too.

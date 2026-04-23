@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-filen-sync",
 	"version": "1.0.0",
-	"description": "Manual Obsidian vault sync through Filen journal files.",
+	"description": "Manual Obsidian vault sync through a Filen folder mirror.",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {

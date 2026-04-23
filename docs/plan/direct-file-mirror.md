@@ -1,85 +1,58 @@
-# Plan: Direct file mirror (remotely-save model)
+# Plan: direct file mirror
 
-Replace journal blobs with a 1:1 vault mirror on Filen. Change detection via
-3-way mtime+size comparison (local vs remote vs prevSync in IndexedDB).
+Status: implemented as MVP.
+
+The plugin mirrors vault files into one Filen folder and uses IndexedDB as the
+last-synced baseline.
 
 ## Architecture
 
-```
+```text
 LOCAL vault files
-   ↕  mtime+size
-PREV SYNC state  ← IndexedDB (SyncDb)
-   ↕  mtime+size
-REMOTE Filen folder  ← mirrors vault tree
+   <-> SyncEngine decision table
+PREV SYNC state  <- IndexedDB / SyncDb
+   <-> SyncEngine decision table
+REMOTE Filen folder
 ```
 
-Decision table: see `docs/remotely-save-research.md` §Stage 3.
+See `docs/filen-sync-implementation-plan.md` for current architecture.
 
-## Files
+## Implemented files
 
-| File | Action |
-|---|---|
-| `src/fs-remote.ts` | New — Filen remote FS adapter (replaces `filen-store.ts`) |
-| `src/sync-engine.ts` | Rewrite — 3-way compare; drop push/pull journal model |
-| `src/settings.ts` | Remove `state.lastPulledKey`, `state.sentJournalKeys` |
-| `src/journal.ts` | Delete |
-| `src/bytes.ts` | Delete (if no other consumer) |
-| `src/db.ts` | Keep — `SyncedFileRecord` shape already correct |
+| File | Status |
+| --- | --- |
+| `src/fs-remote.ts` | Filen `RemoteFs`; walk/read/write/delete/version APIs |
+| `src/sync-engine.ts` | 3-way compare; push/pull/conflict copy |
+| `src/settings.ts` | Saved auth, remote root, device/vault labels |
+| `src/db.ts` | Prev-sync IndexedDB store |
+| `src/progress-view.ts` | Sync progress UI |
+| `src/file-version-modal.ts` | Filen versions UI |
 
-### `RemoteFs` interface (`src/fs-remote.ts`)
+## Decision table target
 
-```ts
-type RemoteEntry = {
-  path: string;   // relative to vault root, e.g. "notes/daily.md"
-  mtime: number;  // FSStats.mtimeMs
-  size: number;   // FSStats.size
-  isDir: boolean;
-};
+| Local vs prev | Remote vs prev | Expected |
+| --- | --- | --- |
+| same | same | skip |
+| changed | same | upload local |
+| same | changed | download remote |
+| missing | same | delete remote |
+| same | missing | delete local |
+| changed | changed | conflict copy + chosen side |
+| new | new | conflict; newer wins |
 
-type RemoteFs = {
-  walk(): Promise<RemoteEntry[]>;
-  readFile(path: string): Promise<Uint8Array>;
-  writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void>;
-  rm(path: string): Promise<void>;
-  mkdir(path: string): Promise<void>;
-  checkConnect(): Promise<void>;
-};
-```
+## Current gaps
 
-`walk()`: `fs.readdir({ path: root, recursive: true })` + `fs.stat()` per entry.
-Synthesize folder entries from path segments if SDK omits them.
+- Delete rows in the decision table are not implemented correctly yet.
+- Remote overwrite behavior still needs runtime confirmation against Filen SDK.
+- Remote walk performs `stat()` per entry; large vault cost unknown.
+- Sync runs sequentially.
 
-### `sync()` stages (`src/sync-engine.ts`)
+## Resolved questions
 
-1. Walk local → `Map<path, {mtime, size, ctime}>`
-2. Walk remote → `Map<path, RemoteEntry>`
-3. Load prevSync from `SyncDb` → `Map<path, SyncedFileRecord>`
-4. Ensemble into `Map<path, MixedEntry>`
-5. Decide per entry (decision table)
-6. Execute with p-queue (concurrency 5)
-7. Upsert `SyncDb` after each success
-
-Conflict strategy: write conflict copy of local file before overwriting.
-Tie-break: keep_newer (higher mtime wins; ties go to local).
-
----
-
-## Unresolved questions
-
-1. **mtime round-trip**: does `filen.fs().writeFile()` honour `File.lastModified` as
-   the remote mtime, or does it always stamp the upload time? If not preserved,
-   every sync sees every file as modified. Must verify before committing to this model.
-
-2. **Bulk listing**: does `readdir({ recursive: true })` return stats (mtime, size) inline,
-   or does walk require N separate `stat()` calls? Check if `cloud().listDirectory()`
-   returns metadata in one response — critical for large vault performance.
-
-3. **Folder entries**: does `readdir` return folder entries, or only files? Determines
-   whether folder entries must be synthesized from file path segments.
-
-4. **Recursive mkdir**: does `filen.fs().mkdir()` create intermediate parents, or only
-   one level at a time?
-
-5. **Socket**: `connectToSocket: false` is currently hardcoded. With a live mirror,
-   should socket be enabled so remote changes are detected without full-walk polling?
-   Cost: persistent network connection, battery impact on mobile.
+| Question | Current answer |
+| --- | --- |
+| Sync model | Direct mirror |
+| Prev-sync storage | IndexedDB via `localforage` |
+| Hash | Local SHA-256 only when metadata changed |
+| Root mkdir | Implemented via `getParentUuid()` recursive-ish path ensure |
+| Socket | Disabled: `connectToSocket: false` |

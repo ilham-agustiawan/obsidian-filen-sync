@@ -1,253 +1,133 @@
-# Filen sync implementation plan
+# Filen sync architecture
 
-Future design for this plugin.
+Current design: direct file mirror to Filen.
 
-## Recommendation
+Filen is used as an opaque remote filesystem. Sync state lives locally in
+IndexedDB.
 
-Use LiveSync's object-storage journal model.
-
-Do not recreate LiveSync's CouchDB path. Filen is not CouchDB-compatible.
-
-Filen should be an opaque remote folder that stores:
-
-```text
-_sync_parameters.json
-_milestone.json
-<timestamp>-<device-id>-<random>-docs.jsonl.gz
-```
-
-## Filen SDK facts
-
-Official docs say:
-
-- Package: `@filen/sdk`.
-- TypeScript SDK.
-- Supports Node.js, browsers, React Native.
-- Browser use needs bundler plus Node polyfills.
-- Virtual FS supports `mkdir`, `readdir`, `stat`, `readFile`, `writeFile`, upload/download helpers.
-- Generated docs recommend `metadataCache: true` and `connectToSocket: true` for virtual FS freshness.
-- SDK license is AGPL-3.0. Decide project licensing before adding dependency.
-
-## Target architecture
+## Data flow
 
 ```text
 Obsidian vault
-  -> StorageEventQueue
-  -> LocalSyncDatabase
-      -> EntryManager
-      -> ChunkStore
-      -> ConflictManager
-  -> FilenJournalReplicator
-      -> FilenJournalStore
-      -> remote control JSON
-  -> ReplicationResultProcessor
-  -> Obsidian vault writer
+  -> SyncEngine
+      -> local walk: TFile metadata + content hash when needed
+      -> prev-sync records: IndexedDB / localforage
+      -> remote walk: Filen folder entries
+  -> per-file decision
+  -> vault writer or Filen writer
+  -> update prev-sync record
 ```
 
-## Suggested modules
+## Main modules
 
 | Module | Responsibility |
 | --- | --- |
-| `settings` | Validate settings, auth mode, remote root |
-| `vault` | Obsidian read/write/stat/list wrapper |
-| `local-db` | IndexedDB/PouchDB wrapper |
-| `entry` | path ID, metadata, chunk save/load |
-| `journal` | JSONL pack/unpack, checkpoints |
-| `filen-store` | Filen SDK adapter only |
-| `replicator` | sync orchestration |
-| `conflict` | detect and resolve conflicts |
-| `commands` | sync, rebuild, status, auth |
+| `src/main.ts` | Plugin lifecycle, commands, status bar, views, auth session |
+| `src/settings.ts` | Settings validation, saved Filen auth, settings UI |
+| `src/fs-remote.ts` | Filen SDK boundary and `RemoteFs` implementation |
+| `src/sync-engine.ts` | 3-way compare, conflict copies, push/pull/write logic |
+| `src/db.ts` | IndexedDB prev-sync records via `localforage` |
+| `src/progress-view.ts` | Sync progress workspace view |
+| `src/file-version-modal.ts` | Filen version list/restore/delete UI |
 
-## Remote store interface
+## Remote FS interface
 
 ```ts
-interface RemoteJournalStore {
-  isAvailable(): Promise<boolean>;
-  listFiles(after: string, limit?: number): Promise<string[]>;
-  uploadFile(key: string, bytes: Uint8Array, mime: string): Promise<void>;
-  downloadFile(key: string): Promise<Uint8Array>;
-  uploadJson<T>(key: string, value: T): Promise<void>;
-  downloadJson<T>(key: string): Promise<T | null>;
-  reset(): Promise<void>;
-  usage(): Promise<{ estimatedSize?: number }>;
-}
-```
-
-Conceptual Filen adapter:
-
-```ts
-class FilenJournalStore implements RemoteJournalStore {
-  constructor(private readonly fsRoot: string, private readonly filen: FilenSDK) {}
-
-  async listFiles(after: string, limit?: number): Promise<string[]> {
-    const names = await this.filen.fs().readdir({ path: this.fsRoot });
-    return names
-      .filter((name) => name > after)
-      .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
-      .slice(0, limit);
-  }
-
-  async uploadFile(key: string, bytes: Uint8Array): Promise<void> {
-    await this.filen.fs().writeFile({
-      path: `${this.fsRoot}/${key}`,
-      content: Buffer.from(bytes),
-    });
-  }
-
-  async downloadFile(key: string): Promise<Uint8Array> {
-    const content = await this.filen.fs().readFile({ path: `${this.fsRoot}/${key}` });
-    return new Uint8Array(content);
-  }
-}
-```
-
-Exact SDK types must be checked during implementation.
-
-## Remote control files
-
-`_sync_parameters.json`:
-
-```ts
-type SyncParameters = {
-  protocolVersion: number;
-  pbkdf2salt: string;
+type RemoteFs = {
+  walk(): Promise<RemoteEntry[]>;
+  readFile(path: string): Promise<Uint8Array>;
+  writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void>;
+  rm(path: string): Promise<void>;
+  mkdir(path: string): Promise<void>;
+  getFileVersions(path: string): Promise<RemoteFileVersion[]>;
+  restoreFileVersion(path: string, versionUuid: string): Promise<void>;
+  deleteFileVersion(versionUuid: string): Promise<void>;
+  checkConnect(): Promise<void>;
+  close(): void;
 };
 ```
 
-`_milestone.json`:
+Filen SDK details stay inside `src/fs-remote.ts`. Sync logic only sees this
+interface.
+
+## Remote layout
+
+```text
+/Apps/obsidian-filen-sync/default/
+  <vault-relative-file-path>
+```
+
+Examples:
+
+```text
+/Apps/obsidian-filen-sync/default/notes/today.md
+/Apps/obsidian-filen-sync/default/assets/photo.jpg
+```
+
+## Local state
+
+`SyncDb` stores one `SyncedFileRecord` per path:
 
 ```ts
-type RemoteMilestone = {
-  created: number;
-  locked: boolean;
-  cleaned?: boolean;
-  acceptedNodes: string[];
-  nodeInfo: Record<string, {
-    deviceName: string;
-    vaultName: string;
-    pluginVersion: string;
-    updatedAt: number;
-    progress?: string;
-  }>;
+type SyncedFileRecord = {
+  path: string;
+  mtime: number;
+  ctime: number;
+  size: number;
+  hash?: string;
 };
 ```
 
-## Local database choice
-
-Use local PouchDB unless proven too heavy.
-
-Pros:
-
-- Revision trees and `revsDiff` solve conflict plumbing.
-- IndexedDB adapter fits Obsidian runtime.
-- LiveSync proves model works.
-
-Cons:
-
-- More dependency weight.
-- Mobile needs early testing.
-
-Avoid direct file mirror to Filen. It loses revision history, conflict fidelity, rename/delete safety, chunk dedupe, and batch semantics.
-
-## MVP scope
-
-Build:
-
-1. Minimal lifecycle and settings tab.
-2. Filen auth spike.
-3. `FilenJournalStore`.
-4. Local DB with metadata docs and whole-file chunks.
-5. Manual push command.
-6. Manual pull command.
-7. DB-to-vault writer.
-8. Delete handling.
-9. Conflict marker files.
-
-Skip initially:
-
-- Content-defined chunking.
-- Continuous background sync.
-- Auto-merge.
-- Hidden file sync.
-- Plugin/theme sync.
-- Remote config QR flow.
-
-Whole-file chunking is acceptable for MVP. Add chunk splitting after end-to-end sync works.
+Database name is `obsidian-filen-sync-${vaultName}`. Store name is
+`synced-files`.
 
 ## Sync algorithm
 
-Push:
+1. Ensure remote root exists.
+2. Walk local vault files, skipping plugin data under `.obsidian/plugins/obsidian-filen-sync/`.
+3. Walk remote Filen tree, skipping `.obsidian`.
+4. Load all prev-sync records from IndexedDB.
+5. Merge paths from all three sources.
+6. Decide per file from local/remote/prev state.
+7. Execute upload, download, delete, skip, or conflict action.
+8. Update or delete prev-sync record after success.
 
-1. Commit pending file events.
-2. Read local DB changes since checkpoint.
-3. Serialize unsent docs as JSONL.
-4. Deflate bytes.
-5. Encrypt bytes if plugin E2EE enabled.
-6. Upload unique journal file.
-7. Save checkpoint.
+Current implementation is sequential. That keeps state updates simple for MVP.
 
-Pull:
+## Conflict behavior
 
-1. List remote journal files after checkpoint.
-2. Skip own sent files.
-3. Download each file.
-4. Decrypt and inflate.
-5. Apply chunks first.
-6. Apply metadata docs with revision preservation.
-7. Queue applied docs for vault write.
-8. Save checkpoint.
+- New on both sides with no baseline: choose newer mtime; count as conflict.
+- Changed on both sides: write local conflict copy, then apply newer side.
+- Pull mode with both changed: write local conflict copy, then download remote.
+- Push mode with both changed: upload local without conflict copy.
 
-## Conflict MVP
+Conflict copy format:
 
-1. Detect `_conflicts`.
-2. If one side deleted and one side edited, keep edited content and mark conflict.
-3. If both changed same markdown file, create conflict copy:
-   - `note.md`
-   - `note.sync-conflict-<device>-<timestamp>.md`
-4. Add UI resolution later.
+```text
+note.sync-conflict-<device-id>-<timestamp>.md
+```
 
-## Encryption plan
+## Known implementation gap
 
-Filen already encrypts account data. Still keep plugin E2EE for portability and defense-in-depth.
+Delete propagation is incomplete:
 
-Rules:
+| Case | Expected | Current |
+| --- | --- | --- |
+| local missing, remote equals prev | delete remote | downloads remote in bidirectional |
+| remote missing, local equals prev | delete local | uploads local in bidirectional |
 
-- Do not encrypt `_sync_parameters.json`.
-- Derive plugin key from passphrase plus `pbkdf2salt`.
-- Encrypt journal files.
-- Encrypt `_milestone.json` only if readable device status is not needed.
+Track fix in `TODO.md`.
 
-## Risks
+## Deferred design
 
-| Risk | Mitigation |
-| --- | --- |
-| Filen SDK AGPL | Decide license before install |
-| Browser polyfills | Spike build first |
-| Mobile runtime | Test auth + read/write early |
-| Filen listing semantics | Use sortable filenames and checkpoints |
-| Filename collision | Include device ID and random suffix |
-| Clock skew | Never rely on timestamp for correctness |
-| Remote reset | Use `locked`/`cleaned` milestone first |
-| Large first sync | Batch journal packs |
-| Secret storage | Prefer session material over raw password |
-
-## Implementation order
-
-1. Add Filen SDK spike branch.
-2. Verify `npm run build` with SDK bundled.
-3. Verify desktop read/write under `/Apps/obsidian-filen-sync/test`.
-4. Verify mobile read/write before building sync core.
-5. Add `RemoteJournalStore` and `FilenJournalStore`.
-6. Add local DB and journal pack/unpack.
-7. Add manual push/pull.
-8. Add vault writer and delete support.
-9. Add conflict marker handling.
-10. Add E2EE.
-11. Add background triggers.
-12. Add chunk splitting.
+- Auto-sync triggers.
+- File filters.
+- Plugin-level E2EE.
+- Chunking/dedup.
+- Rename detection.
+- Concurrent execution.
 
 ## Source refs
 
-- Filen SDK getting started: https://docs.filen.io/docs/sdk/getting-started/
-- Filen file system docs: https://docs.filen.io/docs/sdk/file-system/
-- Filen generated SDK docs: https://sdk-ts-docs.filen.io/
+- `docs/remotely-save-research.md`: 3-way sync model.
+- `docs/filen-sdk-typescript-research.md`: Filen SDK facts.
