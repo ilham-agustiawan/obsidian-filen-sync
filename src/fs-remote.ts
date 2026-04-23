@@ -46,24 +46,55 @@ export class FilenRemoteFs implements RemoteFs {
 	constructor(private readonly config: FilenRemoteFsConfig) {}
 
 	async walk(): Promise<RemoteEntry[]> {
-		await this.ensureRoot();
-		const fs = (await this.getClient()).fs();
-		const root = this.root;
-		const names = await fs.readdir({ path: root, recursive: true });
-		const entries = new Map<string, RemoteEntry>();
+		const rootUuid = await this.getParentUuid("");
+		const cloud = (await this.getClient()).cloud();
+		const visited = new Set<string>([rootUuid]);
 
-		for (const name of names) {
-			const path = normalizeRemotePath(name);
-			const stat = await fs.stat({ path: this.join(path) });
-			entries.set(path, {
-				path,
-				mtime: stat.mtimeMs,
-				size: stat.size,
-				isDir: stat.isDirectory(),
-			});
-		}
+		// Cap concurrent listDirectory calls to avoid hitting API rate limits.
+		const MAX_CONCURRENT = 16;
+		let active = 0;
+		const waitQueue: Array<() => void> = [];
+		const acquire = (): Promise<void> => {
+			if (active < MAX_CONCURRENT) { active++; return Promise.resolve(); }
+			return new Promise(resolve => waitQueue.push(resolve));
+		};
+		const release = (): void => {
+			const next = waitQueue.shift();
+			if (next) { next(); } else { active--; }
+		};
 
-		return [...entries.values()].sort((left, right) => left.path.localeCompare(right.path));
+		const walkDir = async (uuid: string, pathPrefix: string): Promise<RemoteEntry[]> => {
+			await acquire();
+			let items;
+			try {
+				items = await cloud.listDirectory({ uuid });
+			} finally {
+				release();
+			}
+
+			const entries: RemoteEntry[] = [];
+			const subDirPromises: Promise<RemoteEntry[]>[] = [];
+
+			for (const item of items) {
+				const path = pathPrefix.length > 0 ? `${pathPrefix}/${item.name}` : item.name;
+				entries.push({
+					path,
+					mtime: item.lastModified,
+					size: item.size,
+					isDir: item.type === "directory",
+				});
+				if (item.type === "directory" && !visited.has(item.uuid)) {
+					visited.add(item.uuid);
+					subDirPromises.push(walkDir(item.uuid, path));
+				}
+			}
+
+			const subResults = await Promise.all(subDirPromises);
+			return entries.concat(...subResults);
+		};
+
+		const entries = await walkDir(rootUuid, "");
+		return entries.sort((left, right) => left.path.localeCompare(right.path));
 	}
 
 	async readFile(path: string): Promise<Uint8Array> {
