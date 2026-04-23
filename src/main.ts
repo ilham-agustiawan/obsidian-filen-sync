@@ -1,4 +1,4 @@
-import { Menu, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
+import { type EventRef, Menu, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
 import { SyncDb } from "./db";
 import { FilenRemoteFs } from "./fs-remote";
 import { FileVersionModal } from "./file-version-modal";
@@ -14,6 +14,11 @@ export default class FilenSyncPlugin extends Plugin {
 	private statusBarItemEl: HTMLElement | null = null;
 	private syncEngine: SyncEngine | null = null;
 	private isSyncing = false;
+	private autoSyncRibbonEl: HTMLElement | null = null;
+	private debounceTimer: number | null = null;
+	private intervalId: number | null = null;
+	private startupTimerId: number | null = null;
+	private vaultEventRefs: EventRef[] = [];
 	private syncProgress: SyncProgress | null = null;
 	private syncViewState: SyncViewState = {
 		label: "Idle",
@@ -38,6 +43,10 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addRibbonIcon("history", "Filen sync: file versions", () => {
 			void this.openActiveFileVersions();
+		});
+
+		this.autoSyncRibbonEl = this.addRibbonIcon("timer", "", () => {
+			void this.toggleSyncOnSave();
 		});
 
 		this.addCommand({
@@ -88,6 +97,14 @@ export default class FilenSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "toggle-sync-on-save",
+			name: "Toggle sync on save",
+			callback: () => {
+				void this.toggleSyncOnSave();
+			},
+		});
+
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				this.addFileMenuItems(menu, file);
@@ -95,9 +112,12 @@ export default class FilenSyncPlugin extends Plugin {
 		);
 
 		this.addSettingTab(new FilenSyncSettingTab(this.app, this));
+		this.setupAutoSync();
+		this.updateAutoSyncRibbon();
 	}
 
 	onunload() {
+		this.teardownAutoSync();
 		this.syncEngine?.close();
 		this.syncEngine = null;
 	}
@@ -188,16 +208,20 @@ export default class FilenSyncPlugin extends Plugin {
 		});
 	}
 
-	private async runSyncTask(label: string, task: (engine: SyncEngine) => Promise<string>) {
+	private async runSyncTask(
+		label: string,
+		task: (engine: SyncEngine) => Promise<string>,
+		silent = false,
+	) {
 		if (this.isSyncing) {
-			new Notice("Sync already in progress.");
+			if (!silent) new Notice("Sync already in progress.");
 			return;
 		}
 
 		this.isSyncing = true;
 		this.syncProgress = null;
 		this.updateViewState(label, "Starting", null, []);
-		void this.openProgressView();
+		if (!silent) void this.openProgressView();
 		try {
 			this.setStatus(`${label}...`);
 			const engine = this.getSyncEngine();
@@ -205,7 +229,7 @@ export default class FilenSyncPlugin extends Plugin {
 			this.syncProgress = null;
 			this.updateViewState(label, result, null, this.syncViewState.rows);
 			this.setStatus(result);
-			new Notice(`${label}: ${result}`);
+			if (!silent) new Notice(`${label}: ${result}`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
 			this.syncProgress = null;
@@ -216,10 +240,92 @@ export default class FilenSyncPlugin extends Plugin {
 				this.syncEngine?.close();
 				this.syncEngine = null;
 			}
-			new Notice(`${label} failed: ${message}`);
+			if (!silent) new Notice(`${label} failed: ${message}`);
 		} finally {
 			this.isSyncing = false;
 		}
+	}
+
+	setupAutoSync(): void {
+		const { syncOnSave, syncIntervalMinutes, syncStartupDelaySeconds } = this.settings;
+
+		if (syncOnSave) {
+			const handler = () => {
+				// Skip scheduling when a sync is already running — it will capture
+				// any changes written during its own run, including conflict copies.
+				if (this.isSyncing) return;
+				if (this.debounceTimer !== null) window.clearTimeout(this.debounceTimer);
+				this.debounceTimer = window.setTimeout(() => {
+					this.debounceTimer = null;
+					void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
+				}, 5000);
+			};
+			this.vaultEventRefs.push(this.app.vault.on("modify", handler));
+			this.vaultEventRefs.push(this.app.vault.on("create", handler));
+			this.vaultEventRefs.push(this.app.vault.on("delete", handler));
+			this.vaultEventRefs.push(this.app.vault.on("rename", handler));
+		}
+
+		if (syncIntervalMinutes > 0) {
+			this.intervalId = window.setInterval(() => {
+				void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
+			}, syncIntervalMinutes * 60 * 1000);
+		}
+
+		if (syncStartupDelaySeconds > 0) {
+			this.startupTimerId = window.setTimeout(() => {
+				this.startupTimerId = null;
+				void this.runSyncTask("Auto-sync", (engine) => this.autoSyncTask(engine), true);
+			}, syncStartupDelaySeconds * 1000);
+		}
+	}
+
+	private teardownAutoSync(): void {
+		if (this.debounceTimer !== null) {
+			window.clearTimeout(this.debounceTimer);
+			this.debounceTimer = null;
+		}
+		if (this.intervalId !== null) {
+			window.clearInterval(this.intervalId);
+			this.intervalId = null;
+		}
+		if (this.startupTimerId !== null) {
+			window.clearTimeout(this.startupTimerId);
+			this.startupTimerId = null;
+		}
+		for (const ref of this.vaultEventRefs) this.app.vault.offref(ref);
+		this.vaultEventRefs = [];
+	}
+
+	refreshAutoSync(): void {
+		this.teardownAutoSync();
+		this.setupAutoSync();
+		this.updateAutoSyncRibbon();
+	}
+
+	updateAutoSyncRibbon(): void {
+		const isActive = this.settings.syncOnSave || this.settings.syncIntervalMinutes > 0;
+		this.autoSyncRibbonEl?.toggleClass("is-active", isActive);
+		const state = this.settings.syncOnSave ? "on" : "off";
+		this.autoSyncRibbonEl?.setAttribute("aria-label", `Filen sync: sync on save (${state}) — click to toggle`);
+	}
+
+	private async toggleSyncOnSave(): Promise<void> {
+		this.settings.syncOnSave = !this.settings.syncOnSave;
+		await this.saveSettings();
+		this.refreshAutoSync();
+		new Notice(`Sync on save: ${this.settings.syncOnSave ? "enabled" : "disabled"}`);
+	}
+
+	private async autoSyncTask(engine: SyncEngine): Promise<string> {
+		const result = await engine.sync("bidirectional", (progress) => {
+			this.updateSyncProgress("Auto-sync", progress);
+		});
+		if (result.applied === 0 && result.conflicts === 0) return "up to date";
+		const parts: string[] = [];
+		if (result.applied > 0) parts.push(`applied ${result.applied}`);
+		if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
+		return parts.join(", ");
 	}
 
 	private getSyncEngine(): SyncEngine {
@@ -283,10 +389,12 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private async openProgressView() {
-		const leaf = this.app.workspace.getLeftLeaf(false);
+		const existingLeaf = this.app.workspace.getLeavesOfType(FILEN_SYNC_PROGRESS_VIEW_TYPE)[0];
+		const leaf = existingLeaf ?? this.app.workspace.getLeftLeaf(false);
 		if (leaf === null) {
 			return;
 		}
+		await this.app.workspace.revealLeaf(leaf);
 		await leaf.setViewState({
 			type: FILEN_SYNC_PROGRESS_VIEW_TYPE,
 			active: true,
@@ -325,8 +433,18 @@ export default class FilenSyncPlugin extends Plugin {
 			return;
 		}
 
+		menu.addSeparator();
+
 		menu.addItem((item) => {
-			item.setTitle("Open file versions");
+			item.setTitle("Filen: sync now");
+			item.setIcon("sync");
+			item.onClick(() => {
+				void this.syncNow();
+			});
+		});
+
+		menu.addItem((item) => {
+			item.setTitle("Filen: open file versions");
 			item.setIcon("history");
 			item.onClick(() => {
 				void this.openFileVersions(file.path);

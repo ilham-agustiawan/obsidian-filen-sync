@@ -26,6 +26,9 @@ export type FilenSyncSettings = {
 	deviceId: string;
 	vaultName: string;
 	auth: FilenAuth | null;
+	syncOnSave: boolean;
+	syncIntervalMinutes: number;
+	syncStartupDelaySeconds: number;
 };
 
 const DEFAULT_REMOTE_ROOT = "/Apps/obsidian-filen-sync/default";
@@ -36,6 +39,9 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	deviceId: "",
 	vaultName: "default",
 	auth: null,
+	syncOnSave: false,
+	syncIntervalMinutes: 0,
+	syncStartupDelaySeconds: 0,
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -43,6 +49,9 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
 
 const readString = (value: unknown, fallback: string): string =>
 	typeof value === "string" ? value : fallback;
+
+const readBoolean = (value: unknown, fallback: boolean): boolean =>
+	typeof value === "boolean" ? value : fallback;
 
 const readNumber = (value: unknown, fallback: number): number =>
 	typeof value === "number" && Number.isFinite(value) ? value : fallback;
@@ -109,6 +118,9 @@ export const FilenSyncSettings = {
 			deviceId: readString(value.deviceId, ""),
 			vaultName: readString(value.vaultName, DEFAULT_SETTINGS.vaultName),
 			auth: readFilenAuth(value.auth),
+			syncOnSave: readBoolean(value.syncOnSave, DEFAULT_SETTINGS.syncOnSave),
+			syncIntervalMinutes: readNumber(value.syncIntervalMinutes, DEFAULT_SETTINGS.syncIntervalMinutes),
+			syncStartupDelaySeconds: readNumber(value.syncStartupDelaySeconds, DEFAULT_SETTINGS.syncStartupDelaySeconds),
 		};
 	},
 } as const;
@@ -210,6 +222,57 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.vaultName = value.trim() || "default";
 						await this.plugin.saveSettings();
+					}),
+			);
+
+		// ── Auto-sync ────────────────────────────────────────────────────────
+
+		new Setting(containerEl).setName("Auto-sync").setHeading();
+
+		new Setting(containerEl)
+			.setName("Sync on file save")
+			.setDesc("Trigger a bidirectional sync 5 seconds after the last vault change.")
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.syncOnSave)
+					.onChange(async (value) => {
+						this.plugin.settings.syncOnSave = value;
+						await this.plugin.saveSettings();
+						this.plugin.refreshAutoSync();
+					}),
+			);
+
+		const formatInterval = (n: number) => (n === 0 ? "off" : `${n} min`);
+		const intervalSetting = new Setting(containerEl);
+		intervalSetting
+			.setName(`Sync interval (${formatInterval(this.plugin.settings.syncIntervalMinutes)})`)
+			.setDesc("Automatically sync in the background every N minutes. 0 to disable.")
+			.addSlider((slider) =>
+				slider
+					.setLimits(0, 60, 1)
+					.setValue(this.plugin.settings.syncIntervalMinutes)
+					.setDynamicTooltip()
+					.onChange(async (value) => {
+						intervalSetting.setName(`Sync interval (${formatInterval(value)})`);
+						this.plugin.settings.syncIntervalMinutes = value;
+						await this.plugin.saveSettings();
+						this.plugin.refreshAutoSync();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Startup sync delay (seconds)")
+			.setDesc("Sync once N seconds after Obsidian loads. 0 to disable. Takes effect on next restart.")
+			.addText((text) =>
+				text
+					.setPlaceholder("0")
+					.setValue(String(this.plugin.settings.syncStartupDelaySeconds))
+					.onChange(async (value) => {
+						const parsed = parseInt(value, 10);
+						if (Number.isFinite(parsed) && parsed >= 0) {
+							this.plugin.settings.syncStartupDelaySeconds = parsed;
+							await this.plugin.saveSettings();
+						}
 					}),
 			);
 

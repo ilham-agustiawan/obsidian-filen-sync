@@ -31,8 +31,8 @@ Current implementation: direct Filen folder mirror.
 ## Improve
 
 - [ ] File filtering: ignore rules for paths/folders beyond plugin data dir
-- [ ] Auto-sync settings: on save, interval, startup delay
-- [ ] Debounced vault modify trigger
+- [x] Auto-sync settings: on save, interval, startup delay
+- [x] Debounced vault modify trigger
 - [x] Remote walk performance: reduce `stat()` calls if SDK exposes metadata in listing
 - [ ] Conflict strategy setting: keep newer, keep local, keep remote
 - [ ] Safer local deletion path: trash local where Obsidian adapter supports it
