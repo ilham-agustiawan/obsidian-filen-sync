@@ -1,294 +1,456 @@
-import { App, normalizePath, TFile } from "obsidian";
-import { Bytes } from "./bytes";
+import { App, TAbstractFile, TFile, normalizePath } from "obsidian";
 import type { SyncDb } from "./db";
-import type { RemoteJournalStore } from "./filen-store";
-import { Journal, JournalEntry, JournalEnvelope } from "./journal";
-import type { FilenSyncSettings, SyncedFileRecord } from "./settings";
+import type { RemoteEntry, RemoteFs } from "./fs-remote";
+import type { SyncedFileRecord } from "./settings";
 
 type SyncEngineConfig = {
 	app: App;
 	db: SyncDb;
-	settings: FilenSyncSettings;
-	saveSettings: () => Promise<void>;
-	remote: RemoteJournalStore;
+	settings: {
+		deviceId: string;
+		vaultName: string;
+	};
+	remote: RemoteFs;
 };
 
-type PushResult = {
-	entries: number;
-	journalKey: string | null;
-};
-
-type LocalChangeSet = {
-	entries: JournalEntry[];
-	toSet: Map<string, SyncedFileRecord>;
-	toDelete: string[];
-};
-
-type PullResult = {
+type SyncResult = {
 	applied: number;
 	conflicts: number;
 };
 
-const MAX_PULL_FILES = 100;
+type EntrySyncResult = SyncResult & {
+	detail: string;
+	operation: SyncOperation;
+};
+
+export type SyncMode = "bidirectional" | "push-local" | "pull-remote";
+
+export type SyncOperation = "change" | "no-change";
+
+export type SyncProgress = {
+	current: number;
+	total: number;
+	path: string;
+	phase: "scan" | "sync";
+	state: "queued" | "active" | "done" | "failed" | "skipped";
+	operation: SyncOperation;
+	detail: string;
+	at: number;
+};
+
+type MixedEntry = {
+	path: string;
+	local?: LocalEntry;
+	remote?: RemoteEntry;
+	prev?: SyncedFileRecord;
+};
+
+type LocalEntry = {
+	path: string;
+	mtime: number;
+	ctime: number;
+	size: number;
+	file: TAbstractFile;
+};
+
+type PrevRecord = {
+	path: string;
+	mtime: number;
+	ctime: number;
+	size: number;
+	hash?: string;
+};
 
 export class SyncEngine {
 	constructor(private readonly config: SyncEngineConfig) {}
+
+	get remote(): RemoteFs {
+		return this.config.remote;
+	}
 
 	close(): void {
 		this.config.remote.close();
 	}
 
 	async ensureRemote(): Promise<void> {
-		await this.config.remote.ensureRoot();
-		await this.config.remote.writeMilestone(
-			this.config.settings.deviceId,
-			this.config.settings.vaultName,
-		);
+		await this.config.remote.mkdir("");
 	}
 
 	async testRemote(): Promise<void> {
-		await this.config.remote.testReadWrite();
+		await this.config.remote.checkConnect();
 	}
 
-	async push(): Promise<PushResult> {
+	async sync(
+		mode: SyncMode = "bidirectional",
+		onProgress?: (progress: SyncProgress) => void,
+	): Promise<SyncResult> {
 		await this.ensureRemote();
-		const changes = await this.collectLocalChanges();
-		const { entries } = changes;
-		if (entries.length === 0) {
-			return { entries: 0, journalKey: null };
-		}
-
-		const journalKey = this.makeJournalKey();
-		const envelope: JournalEnvelope = {
-			protocolVersion: 1,
-			deviceId: this.config.settings.deviceId,
-			createdAt: Date.now(),
-			entries,
-		};
-
-		await this.config.remote.writeFile(journalKey, await Journal.encode(envelope));
-		await applyChangeSet(this.config.db, changes.toSet, changes.toDelete);
-		this.config.settings.state.sentJournalKeys = rememberSentKey(
-			this.config.settings.state.sentJournalKeys,
-			journalKey,
-		);
-		await this.config.saveSettings();
-
-		return { entries: entries.length, journalKey };
-	}
-
-	async pull(): Promise<PullResult> {
-		await this.ensureRemote();
-		const keys = await this.config.remote.listFiles(
-			this.config.settings.state.lastPulledKey,
-			MAX_PULL_FILES,
-		);
+		const [local, remote, prev] = await Promise.all([
+			this.walkLocal(),
+			this.walkRemote(),
+			this.config.db.getAllFiles(),
+		]);
+		const entries = this.ensemble(local, remote, prev);
 
 		let applied = 0;
 		let conflicts = 0;
+		const total = entries.length;
 
-		for (const key of keys) {
-			if (this.config.settings.state.sentJournalKeys.includes(key)) {
-				this.config.settings.state.lastPulledKey = key;
-				await this.config.saveSettings();
-				continue;
-			}
-
-			const envelope = await Journal.decode(await this.config.remote.readFile(key));
-			for (const entry of envelope.entries) {
-				const result = await this.applyRemoteEntry(entry, envelope.deviceId, envelope.createdAt);
-				applied += result.applied;
-				conflicts += result.conflicts;
-			}
-
-			this.config.settings.state.lastPulledKey = key;
-			await this.config.saveSettings();
+		for (const [index, entry] of entries.entries()) {
+			onProgress?.({
+				current: index + 1,
+				total,
+				path: entry.path,
+				phase: "sync",
+				state: "queued",
+				operation: "no-change",
+				detail: syncModeDetail(mode),
+				at: Date.now(),
+			});
+			onProgress?.({
+				current: index + 1,
+				total,
+				path: entry.path,
+				phase: "sync",
+				state: "active",
+				operation: "no-change",
+				detail: "Checking changes",
+				at: Date.now(),
+			});
+			const result = await this.syncEntry(entry, mode);
+			applied += result.applied;
+			conflicts += result.conflicts;
+			onProgress?.({
+				current: index + 1,
+				total,
+				path: entry.path,
+				phase: "sync",
+				state: result.applied > 0 || result.conflicts > 0 ? "done" : "skipped",
+				operation: result.operation,
+				detail: result.detail,
+				at: Date.now(),
+			});
 		}
 
 		return { applied, conflicts };
 	}
 
-	private async collectLocalChanges(): Promise<LocalChangeSet> {
-		const currentFiles = new Map<string, TFile>();
-		for (const file of this.config.app.vault.getFiles()) {
-			if (shouldSyncPath(file.path, this.config.app.vault.configDir)) {
-				currentFiles.set(file.path, file);
-			}
-		}
-
-		// Load all known file records from DB once so we don't hit IndexedDB per-file.
-		const knownFiles = await this.config.db.getAllFiles();
-
-		const entries: JournalEntry[] = [];
-		const toSet = new Map<string, SyncedFileRecord>();
-		const toDelete: string[] = [];
-
-		for (const [path, file] of currentFiles) {
-			const current = toSyncedFileRecord(file);
-			const previous = knownFiles.get(path);
-
-			// Fast path: metadata unchanged — no need to read content.
-			if (previous !== undefined && sameFileRecord(previous, current)) {
+	private async walkLocal(): Promise<Map<string, LocalEntry>> {
+		const entries = new Map<string, LocalEntry>();
+		for (const file of this.config.app.vault.getAllLoadedFiles()) {
+			if (shouldSkipPath(file.path, this.config.app.vault.configDir)) {
 				continue;
 			}
 
-			const content = new Uint8Array(await this.config.app.vault.readBinary(file));
-			const hash = await Bytes.sha256hex(content);
-
-			// Content unchanged despite metadata shift — skip to avoid redundant upload.
-			if (previous?.hash !== undefined && previous.hash === hash) {
-				// Queue metadata update so the fast path triggers next time.
-				toSet.set(path, { ...current, hash });
-				continue;
+			if (file instanceof TFile) {
+				entries.set(file.path, {
+					path: file.path,
+					mtime: file.stat.mtime,
+					ctime: file.stat.ctime,
+					size: file.stat.size,
+					file,
+				});
 			}
-
-			entries.push({
-				type: "file",
-				path,
-				mtime: current.mtime,
-				ctime: current.ctime,
-				size: current.size,
-				hash,
-				contentBase64: Bytes.toBase64(content),
-			});
-			toSet.set(path, { ...current, hash });
 		}
 
-		for (const path of knownFiles.keys()) {
-			if (currentFiles.has(path)) {
-				continue;
-			}
-
-			entries.push({ type: "delete", path, deletedAt: Date.now() });
-			toDelete.push(path);
-		}
-
-		return { entries, toSet, toDelete };
+		return entries;
 	}
 
-	private async applyRemoteEntry(
-		entry: JournalEntry,
-		remoteDeviceId: string,
-		remoteCreatedAt: number,
-	): Promise<PullResult> {
-		const localFile = this.getFile(entry.path);
-		const previous = await this.config.db.getFile(entry.path);
-		const localChanged = localFile !== null && previous !== undefined
-			? !sameFileRecord(toSyncedFileRecord(localFile), previous)
-			: localFile !== null && previous === undefined;
+	private async walkRemote(): Promise<Map<string, RemoteEntry>> {
+		const entries = new Map<string, RemoteEntry>();
+		for (const entry of await this.config.remote.walk()) {
+			if (shouldSkipPath(entry.path, ".obsidian")) {
+				continue;
+			}
 
-		if (entry.type === "delete") {
-			if (localFile === null) {
+			if (entry.isDir) {
+				continue;
+			}
+
+			entries.set(entry.path, entry);
+		}
+
+		return entries;
+	}
+
+	private ensemble(
+		local: Map<string, LocalEntry>,
+		remote: Map<string, RemoteEntry>,
+		prev: Map<string, SyncedFileRecord>,
+	): MixedEntry[] {
+		const paths = new Set<string>([...local.keys(), ...remote.keys(), ...prev.keys()]);
+		return [...paths].sort().map((path) => ({
+			path,
+			local: local.get(path),
+			remote: remote.get(path),
+			prev: prev.get(path),
+		}));
+	}
+
+	private async syncEntry(entry: MixedEntry, mode: SyncMode): Promise<EntrySyncResult> {
+		return this.syncFile(entry, mode);
+	}
+
+	private async syncFile(entry: MixedEntry, mode: SyncMode): Promise<EntrySyncResult> {
+		const local = entry.local;
+		const remote = entry.remote;
+		const prev = entry.prev;
+
+		if (local === undefined && remote === undefined) {
+			if (prev !== undefined) {
 				await this.config.db.deleteFile(entry.path);
-				return { applied: 0, conflicts: 0 };
 			}
 
-			if (localChanged) {
-				await this.writeConflictCopy(localFile, remoteDeviceId, remoteCreatedAt);
-				return { applied: 0, conflicts: 1 };
+			return skipped("Missing on both sides");
+		}
+
+		if (local !== undefined && remote === undefined) {
+			if (mode === "pull-remote") {
+				return skipped("Local-only file ignored");
 			}
 
-			await this.config.app.fileManager.trashFile(localFile);
-			await this.config.db.deleteFile(entry.path);
-			return { applied: 1, conflicts: 0 };
+			await this.pushLocal(entry.path, local, await this.hashLocal(local));
+			return applied("Uploaded local change");
 		}
 
-		if (localFile !== null && localChanged) {
-			await this.writeConflictCopy(localFile, remoteDeviceId, remoteCreatedAt);
+		if (local === undefined && remote !== undefined) {
+			if (mode === "push-local") {
+				if (prev === undefined) {
+					return skipped("Remote-only file ignored");
+				}
+
+				await this.config.remote.rm(entry.path);
+				await this.config.db.deleteFile(entry.path);
+				return applied("Deleted remote file");
+			}
+
+			await this.pullRemote(entry.path, remote);
+			return applied("Downloaded remote change");
 		}
 
-		await this.writeFileEntry(entry);
-		await this.config.db.setFile(entry.path, {
-			path: entry.path,
-			mtime: entry.mtime,
-			ctime: entry.ctime,
-			size: entry.size,
-			...(entry.hash !== undefined ? { hash: entry.hash } : {}),
-		});
+		if (local === undefined || remote === undefined) {
+			return skipped("File unavailable");
+		}
 
-		return { applied: 1, conflicts: localFile !== null && localChanged ? 1 : 0 };
+		if (prev === undefined) {
+			if (mode === "push-local") {
+				await this.pushLocal(entry.path, local, await this.hashLocal(local));
+				return applied("Uploaded local file");
+			}
+
+			if (mode === "pull-remote") {
+				await this.pullRemote(entry.path, remote);
+				return applied("Downloaded remote file");
+			}
+
+			const newer = chooseNewer(local, remote);
+			if (newer === "local") {
+				await this.pushLocal(entry.path, local, await this.hashLocal(local));
+			} else {
+				await this.pullRemote(entry.path, remote);
+			}
+			return conflict("No baseline; chose newer file");
+		}
+
+		const localChange = await this.detectLocalChange(prev, local);
+		const remoteChanged = !sameRemoteRecord(prev, remote);
+		const localChanged = localChange.changed;
+
+		if (!localChanged && !remoteChanged) {
+			return skipped("Unchanged");
+		}
+
+		if (mode === "push-local" && !localChanged) {
+			return skipped(remoteChanged ? "Remote-only change ignored" : "Unchanged");
+		}
+
+		if (mode === "pull-remote" && !remoteChanged) {
+			return skipped(localChanged ? "Local-only change ignored" : "Unchanged");
+		}
+
+		if (localChanged && !remoteChanged) {
+			if (mode === "pull-remote") {
+				return skipped("Local-only change ignored");
+			}
+
+			await this.pushLocal(entry.path, local, localChange.hash);
+			return applied("Uploaded local change");
+		}
+
+		if (!localChanged && remoteChanged) {
+			if (mode === "push-local") {
+				return skipped("Remote-only change ignored");
+			}
+
+			await this.pullRemote(entry.path, remote);
+			return applied("Downloaded remote change");
+		}
+
+		if (mode === "push-local") {
+			await this.pushLocal(entry.path, local, localChange.hash);
+			return applied("Uploaded local change");
+		}
+
+		if (mode === "pull-remote") {
+			await this.writeConflictCopy(local.path);
+			await this.pullRemote(entry.path, remote);
+			return conflict("Conflict copy kept; downloaded remote");
+		}
+
+		const newer = chooseNewer(local, remote);
+		if (newer === "local") {
+			await this.writeConflictCopy(local.path);
+			await this.pushLocal(entry.path, local, localChange.hash);
+		} else {
+			await this.writeConflictCopy(local.path);
+			await this.pullRemote(entry.path, remote);
+		}
+
+		return conflict(newer === "local" ? "Conflict copy kept; uploaded local" : "Conflict copy kept; downloaded remote");
 	}
 
-	private async writeFileEntry(entry: Extract<JournalEntry, { type: "file" }>): Promise<void> {
-		const path = normalizePath(entry.path);
-		await this.ensureParentFolder(path);
-		await this.config.app.vault.adapter.writeBinary(path, Bytes.fromBase64(entry.contentBase64), {
-			mtime: entry.mtime,
-			ctime: entry.ctime,
+	private async pushLocal(path: string, local: LocalEntry, hash: string): Promise<void> {
+		const content = await this.config.app.vault.readBinary(this.asFile(local.file));
+		await this.config.remote.writeFile(
+			path,
+			content instanceof Uint8Array ? content : new Uint8Array(content),
+			local.mtime,
+			local.ctime,
+		);
+		await this.upsertPrev({
+			path: local.path,
+			mtime: local.mtime,
+			ctime: local.ctime,
+			size: local.size,
+			hash,
 		});
 	}
 
-	private async writeConflictCopy(
-		file: TFile,
-		remoteDeviceId: string,
-		remoteCreatedAt: number,
-	): Promise<void> {
-		const conflictPath = conflictCopyPath(file.path, remoteDeviceId, remoteCreatedAt);
-		await this.ensureParentFolder(conflictPath);
+	private async pullRemote(path: string, remote: RemoteEntry): Promise<void> {
+		const content = await this.config.remote.readFile(path);
+		const hash = await sha256Hex(content);
+		await ensureLocalFolder(this.config.app, path);
+		await this.config.app.vault.adapter.writeBinary(
+			normalizePath(path),
+			content,
+			{ mtime: remote.mtime, ctime: remote.mtime },
+		);
+		await this.upsertPrev({
+			path,
+			mtime: remote.mtime,
+			ctime: remote.mtime,
+			size: remote.size,
+			hash,
+		});
+	}
+
+	private async detectLocalChange(
+		prev: SyncedFileRecord,
+		local: LocalEntry,
+	): Promise<{ changed: boolean; hash: string }> {
+		if (sameFileRecord(prev, local) && prev.hash !== undefined) {
+			return { changed: false, hash: prev.hash };
+		}
+
+		const hash = await this.hashLocal(local);
+		if (sameFileRecord(prev, local)) {
+			await this.upsertPrev({
+				path: local.path,
+				mtime: local.mtime,
+				ctime: local.ctime,
+				size: local.size,
+				hash,
+			});
+			return { changed: false, hash };
+		}
+
+		if (prev.hash !== undefined && prev.hash === hash) {
+			await this.upsertPrev({
+				path: local.path,
+				mtime: local.mtime,
+				ctime: local.ctime,
+				size: local.size,
+				hash,
+			});
+			return { changed: false, hash };
+		}
+
+		return { changed: !sameFileRecord(prev, local), hash };
+	}
+
+	private async hashLocal(local: LocalEntry): Promise<string> {
+		const content = await this.config.app.vault.readBinary(this.asFile(local.file));
+		return sha256Hex(content instanceof Uint8Array ? content : new Uint8Array(content));
+	}
+
+	private async writeConflictCopy(path: string): Promise<void> {
+		const file = this.config.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) {
+			return;
+		}
+
+		const conflictPath = conflictCopyPath(file.path, this.config.settings.deviceId, Date.now());
 		const content = await this.config.app.vault.readBinary(file);
+		await ensureLocalFolder(this.config.app, conflictPath);
 		await this.config.app.vault.adapter.writeBinary(conflictPath, content, {
 			mtime: file.stat.mtime,
 			ctime: file.stat.ctime,
 		});
 	}
 
-	private async ensureParentFolder(path: string): Promise<void> {
-		const parts = normalizePath(path).split("/");
-		parts.pop();
+	private async upsertPrev(record: PrevRecord): Promise<void> {
+		await this.config.db.setFile(record.path, record);
+	}
 
-		let current = "";
-		for (const part of parts) {
-			current = current.length === 0 ? part : `${current}/${part}`;
-			if (this.config.app.vault.getAbstractFileByPath(current) === null) {
-				await this.config.app.vault.createFolder(current);
-			}
+	private asFile(file: TAbstractFile | null): TFile {
+		if (!(file instanceof TFile)) {
+			throw new Error("expected file");
 		}
-	}
 
-	private getFile(path: string): TFile | null {
-		const file = this.config.app.vault.getAbstractFileByPath(path);
-		return file instanceof TFile ? file : null;
-	}
-
-	private makeJournalKey(): string {
-		const timestamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-		const random = crypto.randomUUID().slice(0, 8);
-		return `${timestamp}-${this.config.settings.deviceId}-${random}-docs.jsonl`;
+		return file;
 	}
 }
 
-const toSyncedFileRecord = (file: TFile): SyncedFileRecord => ({
-	path: file.path,
-	mtime: file.stat.mtime,
-	ctime: file.stat.ctime,
-	size: file.stat.size,
-});
+const sameFileRecord = (prev: SyncedFileRecord, local: LocalEntry): boolean =>
+	prev.path === local.path && prev.mtime === local.mtime && prev.ctime === local.ctime && prev.size === local.size;
 
-const sameFileRecord = (left: SyncedFileRecord, right: SyncedFileRecord): boolean => {
-	if (left.hash !== undefined && right.hash !== undefined) {
-		return left.hash === right.hash;
+const sameRemoteRecord = (prev: SyncedFileRecord, remote: RemoteEntry): boolean =>
+	prev.path === remote.path && prev.mtime === remote.mtime && prev.size === remote.size;
+
+const applied = (detail: string): EntrySyncResult => ({ applied: 1, conflicts: 0, detail, operation: "change" });
+
+const skipped = (detail: string): EntrySyncResult => ({ applied: 0, conflicts: 0, detail, operation: "no-change" });
+
+const conflict = (detail: string): EntrySyncResult => ({ applied: 1, conflicts: 1, detail, operation: "change" });
+
+const syncModeDetail = (mode: SyncMode): string => {
+	switch (mode) {
+		case "bidirectional":
+			return "Compare local and remote";
+		case "push-local":
+			return "Upload changed local files only";
+		case "pull-remote":
+			return "Download changed remote files only";
 	}
-
-	return (
-		left.path === right.path &&
-		left.mtime === right.mtime &&
-		left.ctime === right.ctime &&
-		left.size === right.size
-	);
 };
 
-const shouldSyncPath = (path: string, configDir: string): boolean => {
-	if (path.length === 0) {
-		return false;
-	}
-
-	return !path.startsWith(`${configDir}/plugins/obsidian-filen-sync/`);
+const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
+	const digest = await crypto.subtle.digest("SHA-256", bytes);
+	return [...new Uint8Array(digest)]
+		.map((byte) => byte.toString(16).padStart(2, "0"))
+		.join("");
 };
 
-const conflictCopyPath = (path: string, remoteDeviceId: string, remoteCreatedAt: number): string => {
+const chooseNewer = (local: LocalEntry, remote: RemoteEntry): "local" | "remote" =>
+	local.mtime >= remote.mtime ? "local" : "remote";
+
+const shouldSkipPath = (path: string, configDir: string): boolean =>
+	path.length === 0 || path.startsWith(`${configDir}/plugins/obsidian-filen-sync/`);
+
+const conflictCopyPath = (path: string, deviceId: string, timestamp: number): string => {
 	const normalized = normalizePath(path);
 	const dotIndex = normalized.lastIndexOf(".");
-	const suffix = `.sync-conflict-${safePathSegment(remoteDeviceId)}-${remoteCreatedAt}`;
+	const suffix = `.sync-conflict-${safePathSegment(deviceId)}-${timestamp}`;
 	if (dotIndex <= 0) {
 		return `${normalized}${suffix}`;
 	}
@@ -296,17 +458,17 @@ const conflictCopyPath = (path: string, remoteDeviceId: string, remoteCreatedAt:
 	return `${normalized.slice(0, dotIndex)}${suffix}${normalized.slice(dotIndex)}`;
 };
 
-const safePathSegment = (value: string): string =>
-	value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+const safePathSegment = (value: string): string => value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 
-const rememberSentKey = (keys: string[], key: string): string[] => [...keys, key].slice(-200);
+const ensureLocalFolder = async (app: App, path: string): Promise<void> => {
+	const parts = normalizePath(path).split("/");
+	parts.pop();
 
-const applyChangeSet = (
-	db: SyncDb,
-	toSet: Map<string, SyncedFileRecord>,
-	toDelete: string[],
-): Promise<void[]> =>
-	Promise.all([
-		...[...toSet.entries()].map(([path, record]) => db.setFile(path, record)),
-		...toDelete.map((path) => db.deleteFile(path)),
-	]);
+	let current = "";
+	for (const part of parts) {
+		current = current.length === 0 ? part : `${current}/${part}`;
+		if (app.vault.getAbstractFileByPath(current) === null) {
+			await app.vault.createFolder(current);
+		}
+	}
+};

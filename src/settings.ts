@@ -9,11 +9,6 @@ export type SyncedFileRecord = {
 	hash?: string;
 };
 
-export type SyncState = {
-	lastPulledKey: string;
-	sentJournalKeys: string[];
-};
-
 export type FilenAuth = {
 	email: string;
 	masterKeys: string[];
@@ -31,7 +26,6 @@ export type FilenSyncSettings = {
 	deviceId: string;
 	vaultName: string;
 	auth: FilenAuth | null;
-	state: SyncState;
 };
 
 const DEFAULT_REMOTE_ROOT = "/Apps/obsidian-filen-sync/default";
@@ -42,10 +36,6 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	deviceId: "",
 	vaultName: "default",
 	auth: null,
-	state: {
-		lastPulledKey: "",
-		sentJournalKeys: [],
-	},
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -66,17 +56,6 @@ const readAuthVersion = (value: unknown): 1 | 2 | 3 | null => {
 	}
 
 	return null;
-};
-
-const readSyncState = (value: unknown): SyncState => {
-	if (!isRecord(value)) {
-		return DEFAULT_SETTINGS.state;
-	}
-
-	return {
-		lastPulledKey: readString(value.lastPulledKey, ""),
-		sentJournalKeys: readStringArray(value.sentJournalKeys),
-	};
 };
 
 const readFilenAuth = (value: unknown): FilenAuth | null => {
@@ -130,7 +109,6 @@ export const FilenSyncSettings = {
 			deviceId: readString(value.deviceId, ""),
 			vaultName: readString(value.vaultName, DEFAULT_SETTINGS.vaultName),
 			auth: readFilenAuth(value.auth),
-			state: readSyncState(value.state),
 		};
 	},
 } as const;
@@ -212,7 +190,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Remote folder")
-			.setDesc("Filen folder where journal files are stored. Change only when syncing multiple separate vaults.")
+			.setDesc("Filen folder that mirrors the vault. Change only when syncing multiple separate vaults.")
 			.addText((text) =>
 				text
 					.setPlaceholder(DEFAULT_REMOTE_ROOT)
@@ -252,13 +230,35 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Sync now")
-			.setDesc("Pull remote changes then push local changes.")
+			.setDesc("Compare local and remote. Apply the changed side; keep conflict copies when both changed.")
 			.addButton((button) =>
 				button
 					.setButtonText("Sync")
 					.setCta()
 					.onClick(() => {
 						void this.plugin.syncNow();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Push changed local files")
+			.setDesc("Upload local changes only. Unchanged and remote-only files stay untouched.")
+			.addButton((button) =>
+				button
+					.setButtonText("Push")
+					.onClick(() => {
+						void this.plugin.pushLocalChanges();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName("Pull changed remote files")
+			.setDesc("Download remote changes only. Unchanged and local-only files stay untouched.")
+			.addButton((button) =>
+				button
+					.setButtonText("Pull")
+					.onClick(() => {
+						void this.plugin.pullRemoteChanges();
 					}),
 			);
 	}

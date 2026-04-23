@@ -1,8 +1,10 @@
-import { Notice, Plugin } from "obsidian";
+import { Menu, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
 import { SyncDb } from "./db";
-import { FilenJournalStore } from "./filen-store";
+import { FilenRemoteFs } from "./fs-remote";
+import { FileVersionModal } from "./file-version-modal";
+import { FILEN_SYNC_PROGRESS_VIEW_TYPE, FilenSyncProgressView, type SyncViewState } from "./progress-view";
 import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
-import { SyncEngine } from "./sync-engine";
+import { SyncEngine, type SyncProgress } from "./sync-engine";
 
 export default class FilenSyncPlugin extends Plugin {
 	settings: FilenSyncSettings;
@@ -12,15 +14,30 @@ export default class FilenSyncPlugin extends Plugin {
 	private statusBarItemEl: HTMLElement | null = null;
 	private syncEngine: SyncEngine | null = null;
 	private isSyncing = false;
+	private syncProgress: SyncProgress | null = null;
+	private syncViewState: SyncViewState = {
+		label: "Idle",
+		status: "Waiting",
+		progress: null,
+		rows: [],
+	};
 
 	async onload() {
 		this.db = SyncDb.open(this.app.vault.getName());
 		await this.loadSettings();
+		this.registerView(
+			FILEN_SYNC_PROGRESS_VIEW_TYPE,
+			(leaf) => new FilenSyncProgressView(leaf),
+		);
 		this.statusBarItemEl = this.addStatusBarItem();
 		this.setStatus("Idle");
 
 		this.addRibbonIcon("sync", "Filen sync: sync now", () => {
 			void this.syncNow();
+		});
+
+		this.addRibbonIcon("history", "Filen sync: file versions", () => {
+			void this.openActiveFileVersions();
 		});
 
 		this.addCommand({
@@ -33,7 +50,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "push-local-changes",
-			name: "Push local changes",
+			name: "Push changed local files",
 			callback: () => {
 				void this.pushLocalChanges();
 			},
@@ -41,7 +58,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "pull-remote-changes",
-			name: "Pull remote changes",
+			name: "Pull changed remote files",
 			callback: () => {
 				void this.pullRemoteChanges();
 			},
@@ -54,6 +71,28 @@ export default class FilenSyncPlugin extends Plugin {
 				void this.testConnection();
 			},
 		});
+
+		this.addCommand({
+			id: "open-sync-progress",
+			name: "Open sync progress",
+			callback: () => {
+				void this.openProgressView();
+			},
+		});
+
+		this.addCommand({
+			id: "open-active-file-versions",
+			name: "Open active file versions",
+			callback: () => {
+				void this.openActiveFileVersions();
+			},
+		});
+
+		this.registerEvent(
+			this.app.workspace.on("file-menu", (menu, file) => {
+				this.addFileMenuItems(menu, file);
+			}),
+		);
 
 		this.addSettingTab(new FilenSyncSettingTab(this.app, this));
 	}
@@ -106,32 +145,39 @@ export default class FilenSyncPlugin extends Plugin {
 
 	async syncNow() {
 		await this.runSyncTask("Sync", async (engine) => {
-			const pulled = await engine.pull();
-			const pushed = await engine.push();
-			const parts: string[] = [];
-			if (pulled.applied > 0 || pulled.conflicts > 0) {
-				parts.push(`pulled ${pulled.applied}`);
-				if (pulled.conflicts > 0) parts.push(`${pulled.conflicts} conflict(s)`);
+			const result = await engine.sync("bidirectional", (progress) => {
+				this.updateSyncProgress("Sync", progress);
+			});
+			if (result.applied === 0 && result.conflicts === 0) {
+				return "up to date";
 			}
-			if (pushed.entries > 0) parts.push(`pushed ${pushed.entries}`);
-			return parts.length > 0 ? parts.join(", ") : "up to date";
-		});
-	}
 
-	private async pushLocalChanges() {
-		await this.runSyncTask("Push", async (engine) => {
-			const result = await engine.push();
-			return result.entries > 0 ? `pushed ${result.entries}` : "nothing to push";
-		});
-	}
-
-	private async pullRemoteChanges() {
-		await this.runSyncTask("Pull", async (engine) => {
-			const result = await engine.pull();
 			const parts: string[] = [];
-			if (result.applied > 0) parts.push(`pulled ${result.applied}`);
-			if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
-			return parts.length > 0 ? parts.join(", ") : "nothing to pull";
+			if (result.applied > 0) {
+				parts.push(`applied ${result.applied}`);
+			}
+			if (result.conflicts > 0) {
+				parts.push(`${result.conflicts} conflict(s)`);
+			}
+			return parts.join(", ");
+		});
+	}
+
+	async pushLocalChanges() {
+		await this.runSyncTask("Push", async (engine) => {
+			const result = await engine.sync("push-local", (progress) => {
+				this.updateSyncProgress("Push", progress);
+			});
+			return result.applied > 0 ? `applied ${result.applied}` : "nothing to push";
+		});
+	}
+
+	async pullRemoteChanges() {
+		await this.runSyncTask("Pull", async (engine) => {
+			const result = await engine.sync("pull-remote", (progress) => {
+				this.updateSyncProgress("Pull", progress);
+			});
+			return result.applied > 0 ? `applied ${result.applied}` : "nothing to pull";
 		});
 	}
 
@@ -149,16 +195,27 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 
 		this.isSyncing = true;
+		this.syncProgress = null;
+		this.updateViewState(label, "Starting", null, []);
+		void this.openProgressView();
 		try {
 			this.setStatus(`${label}...`);
 			const engine = this.getSyncEngine();
 			const result = await task(engine);
+			this.syncProgress = null;
+			this.updateViewState(label, result, null, this.syncViewState.rows);
 			this.setStatus(result);
 			new Notice(`${label}: ${result}`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
+			this.syncProgress = null;
+			this.updateViewState(label, `${label} failed`, null, this.syncViewState.rows);
 			this.setStatus(`${label} failed`);
 			console.error(`${label} failed`, error);
+			if (message.includes("API key") || message.includes("auth expired")) {
+				this.syncEngine?.close();
+				this.syncEngine = null;
+			}
 			new Notice(`${label} failed: ${message}`);
 		} finally {
 			this.isSyncing = false;
@@ -175,7 +232,7 @@ export default class FilenSyncPlugin extends Plugin {
 		}
 
 		if (this.syncEngine === null) {
-			const store = new FilenJournalStore({
+			const store = new FilenRemoteFs({
 				email: this.settings.email,
 				password: this.sessionPassword,
 				twoFactorCode: this.sessionTwoFactorCode,
@@ -192,12 +249,106 @@ export default class FilenSyncPlugin extends Plugin {
 				app: this.app,
 				db: this.db,
 				settings: this.settings,
-				saveSettings: () => this.saveSettings(),
 				remote: store,
 			});
 		}
 
 		return this.syncEngine;
+	}
+
+	private updateSyncProgress(label: string, progress: SyncProgress) {
+		this.syncProgress = progress;
+		const rows = this.syncViewState.rows.filter((row) => row.path !== progress.path);
+		rows.push({
+			path: progress.path,
+			status: progress.state,
+			operation: progress.operation,
+			detail: progress.detail,
+			at: progress.at,
+			active: progress.state === "active",
+		});
+		this.updateViewState(label, `File ${progress.current} of ${progress.total}`, progress, rows);
+		this.setStatus(`${label} ${progress.current}/${progress.total}: ${progress.path}`);
+	}
+
+	private updateViewState(label: string, status: string, progress: SyncProgress | null, rows: SyncViewState["rows"]) {
+		this.syncViewState = { label, status, progress, rows };
+		const leaves = this.app.workspace.getLeavesOfType(FILEN_SYNC_PROGRESS_VIEW_TYPE);
+		for (const leaf of leaves) {
+			const view = leaf.view;
+			if (view instanceof FilenSyncProgressView) {
+				view.updateState(this.syncViewState);
+			}
+		}
+	}
+
+	private async openProgressView() {
+		const leaf = this.app.workspace.getLeftLeaf(false);
+		if (leaf === null) {
+			return;
+		}
+		await leaf.setViewState({
+			type: FILEN_SYNC_PROGRESS_VIEW_TYPE,
+			active: true,
+		});
+		const view = leaf.view;
+		if (view instanceof FilenSyncProgressView) {
+			view.updateState(this.syncViewState);
+		}
+	}
+
+	private async openActiveFileVersions() {
+		const file = this.app.workspace.getActiveFile();
+		if (file === null) {
+			new Notice("No active file.");
+			return;
+		}
+
+		const remote = this.getSyncEngine().remote;
+		const modal = new FileVersionModal({
+			app: this.app,
+			remote,
+			path: file.path,
+			onRestored: async () => {
+				await this.syncNow();
+			},
+			confirmRestore: async (version) =>
+				window.confirm(`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? Current content will be replaced.`),
+			confirmDelete: async (version) =>
+				window.confirm(`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? This cannot be undone.`),
+		});
+		modal.open();
+	}
+
+	private addFileMenuItems(menu: Menu, file: TAbstractFile) {
+		if (!(file instanceof TFile)) {
+			return;
+		}
+
+		menu.addItem((item) => {
+			item.setTitle("Open file versions");
+			item.setIcon("history");
+			item.onClick(() => {
+				void this.openFileVersions(file.path);
+			});
+		});
+	}
+
+	private async openFileVersions(path: string) {
+		const remote = this.getSyncEngine().remote;
+		const modal = new FileVersionModal({
+			app: this.app,
+			remote,
+			path,
+			onRestored: async () => {
+				await this.syncNow();
+			},
+			confirmRestore: async (version) =>
+				window.confirm(`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${path}? Current content will be replaced.`),
+			confirmDelete: async (version) =>
+				window.confirm(`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${path}? This cannot be undone.`),
+		});
+		modal.open();
 	}
 
 	private setStatus(value: string) {
