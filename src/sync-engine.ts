@@ -117,7 +117,22 @@ export class SyncEngine {
 				detail: "Checking changes",
 				at: Date.now(),
 			});
-			const result = await this.syncEntry(entry, mode);
+			let result: EntrySyncResult;
+			try {
+				result = await this.syncEntry(entry, mode);
+			} catch (err) {
+				onProgress?.({
+					current: index + 1,
+					total,
+					path: entry.path,
+					phase: "sync",
+					state: "failed",
+					operation: "change",
+					detail: err instanceof Error ? err.message : "Sync failed",
+					at: Date.now(),
+				});
+				throw err;
+			}
 			applied += result.applied;
 			conflicts += result.conflicts;
 			onProgress?.({
@@ -206,7 +221,18 @@ export class SyncEngine {
 
 		if (local !== undefined && remote === undefined) {
 			if (mode === "pull-remote") {
+				if (prev !== undefined) {
+					await this.deleteLocal(entry.path);
+					await this.config.db.deleteFile(entry.path);
+					return applied("Deleted local file");
+				}
 				return skipped("Local-only file ignored");
+			}
+
+			if (mode === "bidirectional" && prev !== undefined) {
+				await this.deleteLocal(entry.path);
+				await this.config.db.deleteFile(entry.path);
+				return applied("Deleted local file");
 			}
 
 			await this.pushLocal(entry.path, local, await this.hashLocal(local));
@@ -219,6 +245,12 @@ export class SyncEngine {
 					return skipped("Remote-only file ignored");
 				}
 
+				await this.config.remote.rm(entry.path);
+				await this.config.db.deleteFile(entry.path);
+				return applied("Deleted remote file");
+			}
+
+			if (mode === "bidirectional" && prev !== undefined) {
 				await this.config.remote.rm(entry.path);
 				await this.config.db.deleteFile(entry.path);
 				return applied("Deleted remote file");
@@ -396,6 +428,12 @@ export class SyncEngine {
 			mtime: file.stat.mtime,
 			ctime: file.stat.ctime,
 		});
+	}
+
+	private async deleteLocal(path: string): Promise<void> {
+		const file = this.config.app.vault.getAbstractFileByPath(normalizePath(path));
+		if (file === null) return;
+		await this.config.app.vault.trash(file, true);
 	}
 
 	private async upsertPrev(record: PrevRecord): Promise<void> {

@@ -19,14 +19,14 @@ Current implementation: direct Filen folder mirror.
 
 ## Fix next
 
-- [ ] Delete propagation in bidirectional mode
+- [x] Delete propagation in bidirectional mode
   - local deleted + remote unchanged => delete remote
   - remote deleted + local unchanged => delete local
-- [ ] Delete propagation in one-way modes
+- [x] Delete propagation in one-way modes
   - push mode should delete remote when local deleted from prev
   - pull mode should delete local when remote deleted from prev
-- [ ] Remote overwrite semantics: confirm repeated upload replaces existing file, not duplicate/rename
-- [ ] Failed row state: mark per-file failures in progress table before throwing
+- [x] Remote overwrite semantics: Filen SDK versions on same parent+name; walk deduplicates by path; no code change needed
+- [x] Failed row state: mark per-file failures in progress table before throwing
 
 ## Improve
 
