@@ -8,9 +8,9 @@ conflict copies when both local and remote files changed.
 
 ## Status
 
-MVP. Use with backups.
+Early release. Use with backups.
 
-Targets desktop and mobile, but mobile runtime still needs verification.
+Targets desktop and mobile.
 
 ## Features
 
@@ -19,20 +19,21 @@ Targets desktop and mobile, but mobile runtime still needs verification.
 - Session-only password and 2FA code
 - Manual bidirectional sync
 - Manual push-local and pull-remote modes
-- Sync progress view
+- Optional auto-sync on save, interval, and startup delay
+- Dynamic status bar sync indicator with quick actions
+- Sync activity view styled closer to native Obsidian Sync
 - Conflict copies for both-sides edits
-- Filen file version list, restore, and delete
+- Filen file version list, restore, and delete from the file context menu
 - Local previous-sync state in IndexedDB
 - SHA-256 content hash fallback for timestamp drift
+- Vault-relative ignore rules with Obsidian-friendly defaults
 
 ## Known limitations
 
-- Delete propagation is not complete yet.
-- No auto-sync triggers.
-- No file filtering.
-- No rename detection; renames are delete + create.
-- No chunking or deduplication.
-- No plugin-level encryption beyond Filen account encryption.
+- Conflicts keep a local conflict copy, but there is no side-by-side conflict resolution UI yet.
+- Conflict strategy is not configurable yet.
+- No rename detection; renames are treated as delete + create.
+- Auto-sync is lightweight, not realtime socket sync.
 
 ## Requirements
 
@@ -66,11 +67,13 @@ Then enable **Filen Sync** in **Settings -> Community plugins**.
 2. Enter Filen email.
 3. Enter password and optional 2FA code.
 4. Keep the default remote folder, or set a custom one.
-5. Run **Test connection**.
-6. Run **Sync now**.
+5. Review **Ignore paths** if you want to exclude extra folders or files.
+6. Run **Test connection**.
+7. Run **Sync now**.
 
 Password and 2FA code are used only for the current Obsidian session. Saved
-Filen auth is stored in Obsidian plugin data. Use **Sign out** to clear it.
+Filen auth is stored in Obsidian plugin data. Once connected, settings show a
+clear connected state with a **Disconnect** action.
 
 ## Commands
 
@@ -79,9 +82,16 @@ Filen auth is stored in Obsidian plugin data. Use **Sign out** to clear it.
 | **Filen Sync: Sync now** | Compare local and remote. Apply changed side. Keep conflict copies. |
 | **Filen Sync: Push changed local files** | Upload local changes only. |
 | **Filen Sync: Pull changed remote files** | Download remote changes only. |
-| **Filen Sync: Test filen connection** | Verify auth and remote write/delete access. |
-| **Filen Sync: Open sync progress** | Show current or last sync rows. |
-| **Filen Sync: Open active file versions** | Manage Filen versions for active file. |
+| **Filen Sync: Test Filen connection** | Verify auth and remote write/delete access. |
+| **Filen Sync: Open sync activity** | Show current or last sync activity rows. |
+| **Filen Sync: Toggle sync on save** | Turn save-triggered background sync on or off. |
+
+## UI
+
+- The plugin uses a single status bar item for sync state, hover details, and quick actions.
+- **File versions** are available from the file context menu.
+- The settings tab is organized into **Account and authentication**, **Sync strategy**, **Auto-sync**, and **Actions**.
+- Default ignore rules skip `.obsidian/cache`, `.obsidian/workspace*.json`, `.git`, `node_modules`, and the plugin's own data folder.
 
 ## Remote layout
 

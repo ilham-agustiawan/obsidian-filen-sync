@@ -1,4 +1,5 @@
 import { App, TAbstractFile, TFile, normalizePath } from "obsidian";
+import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
 import type { SyncDb } from "./db";
 import type { RemoteEntry, RemoteFs } from "./fs-remote";
 import type { SyncedFileRecord } from "./settings";
@@ -6,9 +7,11 @@ import type { SyncedFileRecord } from "./settings";
 type SyncEngineConfig = {
 	app: App;
 	db: SyncDb;
+	pluginId: string;
 	settings: {
 		deviceId: string;
 		vaultName: string;
+		ignorePatterns: string[];
 	};
 	remote: RemoteFs;
 };
@@ -25,7 +28,7 @@ type EntrySyncResult = SyncResult & {
 
 export type SyncMode = "bidirectional" | "push-local" | "pull-remote";
 
-export type SyncOperation = "change" | "no-change";
+export type SyncOperation = "scan" | "upload" | "download" | "delete-local" | "delete-remote" | "conflict" | "noop";
 
 export type SyncProgress = {
 	current: number;
@@ -85,12 +88,18 @@ export class SyncEngine {
 		onProgress?: (progress: SyncProgress) => void,
 	): Promise<SyncResult> {
 		await this.ensureRemote();
+		const pathFilter = createSyncPathFilter({
+			configDir: this.config.app.vault.configDir,
+			pluginId: this.config.pluginId,
+			ignorePatterns: this.config.settings.ignorePatterns,
+		});
 		onProgress?.(scanProgress(1, "Vault and Filen", "Scanning vault and Filen"));
-		const [local, remote, prev] = await Promise.all([
-			this.walkLocal(),
-			this.walkRemote(),
+		const [local, remote, prevRecords] = await Promise.all([
+			this.walkLocal(pathFilter),
+			this.walkRemote(pathFilter),
 			this.config.db.getAllFiles(),
 		]);
+		const prev = filterPrevRecords(prevRecords, pathFilter);
 		onProgress?.(scanProgress(2, "Sync database", "Reading previous sync state"));
 		const entries = this.ensemble(local, remote, prev);
 		onProgress?.(scanProgress(
@@ -110,7 +119,7 @@ export class SyncEngine {
 				path: entry.path,
 				phase: "sync",
 				state: "queued",
-				operation: "no-change",
+				operation: "noop",
 				detail: syncModeDetail(mode),
 				at: Date.now(),
 			});
@@ -120,7 +129,7 @@ export class SyncEngine {
 				path: entry.path,
 				phase: "sync",
 				state: "active",
-				operation: "no-change",
+				operation: "noop",
 				detail: "Checking changes",
 				at: Date.now(),
 			});
@@ -134,7 +143,7 @@ export class SyncEngine {
 					path: entry.path,
 					phase: "sync",
 					state: "failed",
-					operation: "change",
+					operation: "noop",
 					detail: err instanceof Error ? err.message : "Sync failed",
 					at: Date.now(),
 				});
@@ -157,10 +166,10 @@ export class SyncEngine {
 		return { applied, conflicts };
 	}
 
-	private async walkLocal(): Promise<Map<string, LocalEntry>> {
+	private async walkLocal(pathFilter: SyncPathFilter): Promise<Map<string, LocalEntry>> {
 		const entries = new Map<string, LocalEntry>();
 		for (const file of this.config.app.vault.getAllLoadedFiles()) {
-			if (shouldSkipPath(file.path, this.config.app.vault.configDir)) {
+			if (pathFilter.isIgnored(file.path)) {
 				continue;
 			}
 
@@ -178,10 +187,10 @@ export class SyncEngine {
 		return entries;
 	}
 
-	private async walkRemote(): Promise<Map<string, RemoteEntry>> {
+	private async walkRemote(pathFilter: SyncPathFilter): Promise<Map<string, RemoteEntry>> {
 		const entries = new Map<string, RemoteEntry>();
 		for (const entry of await this.config.remote.walk()) {
-			if (shouldSkipPath(entry.path, this.config.app.vault.configDir)) {
+			if (pathFilter.isIgnored(entry.path)) {
 				continue;
 			}
 
@@ -231,7 +240,7 @@ export class SyncEngine {
 				if (prev !== undefined) {
 					await this.deleteLocal(entry.path);
 					await this.config.db.deleteFile(entry.path);
-					return applied("Deleted local file");
+					return applied("Deleted local file", "delete-local");
 				}
 				return skipped("Local-only file ignored");
 			}
@@ -239,11 +248,11 @@ export class SyncEngine {
 			if (mode === "bidirectional" && prev !== undefined) {
 				await this.deleteLocal(entry.path);
 				await this.config.db.deleteFile(entry.path);
-				return applied("Deleted local file");
+				return applied("Deleted local file", "delete-local");
 			}
 
 			await this.pushLocal(entry.path, local, await this.hashLocal(local));
-			return applied("Uploaded local change");
+			return applied("Uploaded local change", "upload");
 		}
 
 		if (local === undefined && remote !== undefined) {
@@ -254,17 +263,17 @@ export class SyncEngine {
 
 				await this.config.remote.rm(entry.path);
 				await this.config.db.deleteFile(entry.path);
-				return applied("Deleted remote file");
+				return applied("Deleted remote file", "delete-remote");
 			}
 
 			if (mode === "bidirectional" && prev !== undefined) {
 				await this.config.remote.rm(entry.path);
 				await this.config.db.deleteFile(entry.path);
-				return applied("Deleted remote file");
+				return applied("Deleted remote file", "delete-remote");
 			}
 
 			await this.pullRemote(entry.path, remote);
-			return applied("Downloaded remote change");
+			return applied("Downloaded remote change", "download");
 		}
 
 		if (local === undefined || remote === undefined) {
@@ -274,12 +283,12 @@ export class SyncEngine {
 		if (prev === undefined) {
 			if (mode === "push-local") {
 				await this.pushLocal(entry.path, local, await this.hashLocal(local));
-				return applied("Uploaded local file");
+				return applied("Uploaded local file", "upload");
 			}
 
 			if (mode === "pull-remote") {
 				await this.pullRemote(entry.path, remote);
-				return applied("Downloaded remote file");
+				return applied("Downloaded remote file", "download");
 			}
 
 			const newer = chooseNewer(local, remote);
@@ -313,7 +322,7 @@ export class SyncEngine {
 			}
 
 			await this.pushLocal(entry.path, local, localChange.hash);
-			return applied("Uploaded local change");
+			return applied("Uploaded local change", "upload");
 		}
 
 		if (!localChanged && remoteChanged) {
@@ -322,12 +331,12 @@ export class SyncEngine {
 			}
 
 			await this.pullRemote(entry.path, remote);
-			return applied("Downloaded remote change");
+			return applied("Downloaded remote change", "download");
 		}
 
 		if (mode === "push-local") {
 			await this.pushLocal(entry.path, local, localChange.hash);
-			return applied("Uploaded local change");
+			return applied("Uploaded local change", "upload");
 		}
 
 		if (mode === "pull-remote") {
@@ -462,11 +471,16 @@ const sameFileRecord = (prev: SyncedFileRecord, local: LocalEntry): boolean =>
 const sameRemoteRecord = (prev: SyncedFileRecord, remote: RemoteEntry): boolean =>
 	prev.path === remote.path && prev.mtime === remote.mtime && prev.size === remote.size;
 
-const applied = (detail: string): EntrySyncResult => ({ applied: 1, conflicts: 0, detail, operation: "change" });
+const applied = (detail: string, operation: Exclude<SyncOperation, "scan" | "conflict" | "noop">): EntrySyncResult => ({
+	applied: 1,
+	conflicts: 0,
+	detail,
+	operation,
+});
 
-const skipped = (detail: string): EntrySyncResult => ({ applied: 0, conflicts: 0, detail, operation: "no-change" });
+const skipped = (detail: string): EntrySyncResult => ({ applied: 0, conflicts: 0, detail, operation: "noop" });
 
-const conflict = (detail: string): EntrySyncResult => ({ applied: 1, conflicts: 1, detail, operation: "change" });
+const conflict = (detail: string): EntrySyncResult => ({ applied: 1, conflicts: 1, detail, operation: "conflict" });
 
 const syncModeDetail = (mode: SyncMode): string => {
 	switch (mode) {
@@ -485,7 +499,7 @@ const scanProgress = (current: number, path: string, detail: string): SyncProgre
 	path,
 	phase: "scan",
 	state: "done",
-	operation: "no-change",
+	operation: "scan",
 	detail,
 	at: Date.now(),
 });
@@ -500,8 +514,19 @@ const sha256Hex = async (bytes: Uint8Array): Promise<string> => {
 const chooseNewer = (local: LocalEntry, remote: RemoteEntry): "local" | "remote" =>
 	local.mtime >= remote.mtime ? "local" : "remote";
 
-const shouldSkipPath = (path: string, configDir: string): boolean =>
-	path.length === 0 || path.startsWith(`${configDir}/plugins/obsidian-filen-sync/`);
+const filterPrevRecords = (
+	records: Map<string, SyncedFileRecord>,
+	pathFilter: SyncPathFilter,
+): Map<string, SyncedFileRecord> => {
+	const filtered = new Map<string, SyncedFileRecord>();
+	for (const [path, record] of records) {
+		if (!pathFilter.isIgnored(path)) {
+			filtered.set(path, record);
+		}
+	}
+
+	return filtered;
+};
 
 const conflictCopyPath = (path: string, deviceId: string, timestamp: number): string => {
 	const normalized = normalizePath(path);

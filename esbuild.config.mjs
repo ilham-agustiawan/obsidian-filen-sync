@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
+import path from "node:path";
 import process from "process";
-import { builtinModules } from 'node:module';
+import { polyfillNode } from "esbuild-plugin-polyfill-node";
 
 const banner =
 `/*
@@ -10,6 +11,7 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = (process.argv[2] === "production");
+const fsExtraShimPath = path.resolve("src/shims/fs-extra.ts");
 
 const context = await esbuild.context({
 	banner: {
@@ -17,9 +19,9 @@ const context = await esbuild.context({
 	},
 	entryPoints: ["src/main.ts"],
 	bundle: true,
+	platform: "browser",
 	external: [
 		"obsidian",
-		"electron",
 		"@codemirror/autocomplete",
 		"@codemirror/collab",
 		"@codemirror/commands",
@@ -30,8 +32,31 @@ const context = await esbuild.context({
 		"@codemirror/view",
 		"@lezer/common",
 		"@lezer/highlight",
-		"@lezer/lr",
-		...builtinModules],
+		"@lezer/lr"
+	],
+	plugins: [
+		{
+			name: "alias-fs-extra-browser-shim",
+			setup(build) {
+				build.onResolve({ filter: /^fs-extra$/ }, () => ({ path: fsExtraShimPath }));
+			},
+		},
+		polyfillNode({
+			polyfills: {
+				fs: false,
+				crypto: true,
+				os: true,
+				path: true,
+				stream: true,
+				events: true,
+				util: true,
+				assert: true,
+				constants: true,
+				https: true,
+				url: true
+			}
+		})
+	],
 	format: "cjs",
 	target: "es2018",
 	logLevel: "info",

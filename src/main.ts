@@ -1,10 +1,26 @@
-import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile } from "obsidian";
+import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, setIcon } from "obsidian";
 import { SyncDb } from "./db";
 import { FilenRemoteFs } from "./fs-remote";
 import { FileVersionModal } from "./file-version-modal";
-import { FILEN_SYNC_PROGRESS_VIEW_TYPE, FilenSyncProgressView, type SyncViewState } from "./progress-view";
+import { FilenSyncSetupModal } from "./onboarding-modal";
+import {
+	FILEN_SYNC_PROGRESS_VIEW_TYPE,
+	FilenSyncProgressView,
+	type SyncActivityRow,
+	type SyncMetrics,
+	type SyncViewState,
+} from "./progress-view";
 import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
 import { SyncEngine, type SyncProgress } from "./sync-engine";
+
+type StatusBarKind = "idle" | "syncing" | "success" | "warning" | "error";
+
+type StatusBarState = {
+	kind: StatusBarKind;
+	text: string;
+	detail: string;
+	updatedAt: number | null;
+};
 
 export default class FilenSyncPlugin extends Plugin {
 	settings: FilenSyncSettings;
@@ -12,9 +28,16 @@ export default class FilenSyncPlugin extends Plugin {
 	private sessionPassword = "";
 	private sessionTwoFactorCode = "";
 	private statusBarItemEl: HTMLElement | null = null;
+	private statusBarIconEl: HTMLElement | null = null;
+	private statusBarTextEl: HTMLElement | null = null;
+	private statusBarState: StatusBarState = {
+		kind: "idle",
+		text: "Set up Filen",
+		detail: "Open settings to connect your Filen account.",
+		updatedAt: null,
+	};
 	private syncEngine: SyncEngine | null = null;
 	private isSyncing = false;
-	private autoSyncRibbonEl: HTMLElement | null = null;
 	private debounceTimer: number | null = null;
 	private intervalId: number | null = null;
 	private startupTimerId: number | null = null;
@@ -23,10 +46,15 @@ export default class FilenSyncPlugin extends Plugin {
 	private pendingAutoSync = false;
 	private lastActiveFilePath: string | null = null;
 	private syncProgress: SyncProgress | null = null;
+	private setupPromptShown = false;
+	private syncActivityCounter = 0;
 	private syncViewState: SyncViewState = {
 		label: "Idle",
-		status: "Waiting",
+		status: "Waiting for next sync",
+		detail: "No sync has run yet.",
 		progress: null,
+		latestScanAt: null,
+		metrics: createEmptyMetrics(),
 		rows: [],
 	};
 
@@ -38,19 +66,8 @@ export default class FilenSyncPlugin extends Plugin {
 			(leaf) => new FilenSyncProgressView(leaf),
 		);
 		this.statusBarItemEl = this.addStatusBarItem();
-		this.setStatus("Idle");
-
-		this.addRibbonIcon("sync", "Filen sync: sync now", () => {
-			void this.syncNow();
-		});
-
-		this.addRibbonIcon("history", "Filen sync: file versions", () => {
-			void this.openActiveFileVersions();
-		});
-
-		this.autoSyncRibbonEl = this.addRibbonIcon("timer", "", () => {
-			void this.toggleSyncOnSave();
-		});
+		this.initializeStatusBar();
+		this.setDefaultStatus();
 
 		this.addCommand({
 			id: "sync-now",
@@ -78,7 +95,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "test-filen-connection",
-			name: "Test filen connection",
+			name: "Test Filen connection",
 			callback: () => {
 				void this.testConnection();
 			},
@@ -86,17 +103,9 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "open-sync-progress",
-			name: "Open sync progress",
+			name: "Open sync activity",
 			callback: () => {
 				void this.openProgressView();
-			},
-		});
-
-		this.addCommand({
-			id: "open-active-file-versions",
-			name: "Open active file versions",
-			callback: () => {
-				void this.openActiveFileVersions();
 			},
 		});
 
@@ -116,7 +125,10 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addSettingTab(new FilenSyncSettingTab(this.app, this));
 		this.setupAutoSync();
-		this.updateAutoSyncRibbon();
+		this.renderStatusBar();
+		this.app.workspace.onLayoutReady(() => {
+			this.maybePromptForSetup();
+		});
 	}
 
 	onunload() {
@@ -148,8 +160,11 @@ export default class FilenSyncPlugin extends Plugin {
 	async clearSavedAuth() {
 		this.syncEngine?.close();
 		this.syncEngine = null;
+		this.sessionPassword = "";
+		this.sessionTwoFactorCode = "";
 		this.settings.auth = null;
 		await this.saveSettings();
+		this.setStatus("Not connected", "idle", "Open settings to connect your Filen account.", null);
 	}
 
 	async loadSettings() {
@@ -211,42 +226,28 @@ export default class FilenSyncPlugin extends Plugin {
 		});
 	}
 
-	private async runSyncTask(
-		label: string,
-		task: (engine: SyncEngine) => Promise<string>,
-		silent = false,
-	) {
-		if (this.isSyncing) {
-			if (!silent) new Notice("Sync already in progress.");
+	openSettingsTab(): void {
+		const settingManager = (this.app as App & {
+			setting: { open: () => void; openTabById: (id: string) => void };
+		}).setting;
+		settingManager.open();
+		settingManager.openTabById(this.manifest.id);
+	}
+
+	public async openProgressView() {
+		const existingLeaf = this.app.workspace.getLeavesOfType(FILEN_SYNC_PROGRESS_VIEW_TYPE)[0];
+		const leaf = existingLeaf ?? this.app.workspace.getLeftLeaf(false);
+		if (leaf === null) {
 			return;
 		}
-
-		this.isSyncing = true;
-		this.syncProgress = null;
-		this.updateViewState(label, "Starting", null, []);
-		if (!silent) void this.openProgressView();
-		try {
-			this.setStatus(`${label}...`);
-			const engine = this.getSyncEngine();
-			const result = await task(engine);
-			this.syncProgress = null;
-			this.updateViewState(label, result, null, this.syncViewState.rows);
-			this.setStatus(result);
-			if (!silent) new Notice(`${label}: ${result}`);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "Unknown error";
-			this.syncProgress = null;
-			this.updateViewState(label, `${label} failed`, null, this.syncViewState.rows);
-			this.setStatus(`${label} failed`);
-			console.error(`${label} failed`, error);
-			if (message.includes("API key") || message.includes("auth expired")) {
-				this.syncEngine?.close();
-				this.syncEngine = null;
-			}
-			if (!silent) new Notice(`${label} failed: ${message}`);
-		} finally {
-			this.isSyncing = false;
-			this.runPendingAutoSync();
+		await this.app.workspace.revealLeaf(leaf);
+		await leaf.setViewState({
+			type: FILEN_SYNC_PROGRESS_VIEW_TYPE,
+			active: true,
+		});
+		const view = leaf.view;
+		if (view instanceof FilenSyncProgressView) {
+			view.updateState(this.syncViewState);
 		}
 	}
 
@@ -307,14 +308,7 @@ export default class FilenSyncPlugin extends Plugin {
 	refreshAutoSync(): void {
 		this.teardownAutoSync();
 		this.setupAutoSync();
-		this.updateAutoSyncRibbon();
-	}
-
-	updateAutoSyncRibbon(): void {
-		const isActive = this.settings.syncOnSave || this.settings.syncIntervalMinutes > 0;
-		this.autoSyncRibbonEl?.toggleClass("is-active", isActive);
-		const state = this.settings.syncOnSave ? "on" : "off";
-		this.autoSyncRibbonEl?.setAttribute("aria-label", `Filen sync: sync on save (${state}) — click to toggle`);
+		this.renderStatusBar();
 	}
 
 	private async toggleSyncOnSave(): Promise<void> {
@@ -377,6 +371,71 @@ export default class FilenSyncPlugin extends Plugin {
 		return file.path === activePath || oldPath === activePath;
 	}
 
+	private async runSyncTask(
+		label: string,
+		task: (engine: SyncEngine) => Promise<string>,
+		silent = false,
+	) {
+		if (this.isSyncing) {
+			if (!silent) new Notice("Sync already in progress.");
+			return;
+		}
+
+		this.isSyncing = true;
+		this.syncProgress = null;
+		this.updateViewState({
+			...this.syncViewState,
+			label,
+			status: "Starting",
+			detail: `Starting ${label.toLowerCase()}...`,
+			progress: null,
+			latestScanAt: Date.now(),
+			metrics: createEmptyMetrics(),
+		});
+		this.setStatus(`${label} in progress`, "syncing", `Starting ${label.toLowerCase()}...`);
+		if (!silent) void this.openProgressView();
+		try {
+			const engine = this.getSyncEngine();
+			const result = await task(engine);
+			this.syncProgress = null;
+			this.updateViewState({
+				...this.syncViewState,
+				label,
+				status: result,
+				detail: describeSyncCompletion(label, result),
+				progress: null,
+				latestScanAt: Date.now(),
+			});
+			this.setStatus(
+				result,
+				result.includes("conflict") ? "warning" : "success",
+				`${label} finished: ${result}`,
+			);
+			if (!silent) new Notice(`${label}: ${result}`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			this.syncProgress = null;
+			this.updateViewState({
+				...this.syncViewState,
+				label,
+				status: `${label} failed`,
+				detail: message,
+				progress: null,
+				latestScanAt: Date.now(),
+			});
+			this.setStatus(`${label} failed`, "error", message);
+			console.error(`${label} failed`, error);
+			if (message.includes("API key") || message.includes("auth expired")) {
+				this.syncEngine?.close();
+				this.syncEngine = null;
+			}
+			if (!silent) new Notice(`${label} failed: ${message}`);
+		} finally {
+			this.isSyncing = false;
+			this.runPendingAutoSync();
+		}
+	}
+
 	private getSyncEngine(): SyncEngine {
 		if (this.settings.email.length === 0) {
 			throw new Error("Filen email missing. Add it in plugin settings.");
@@ -397,12 +456,18 @@ export default class FilenSyncPlugin extends Plugin {
 					this.settings.auth = auth;
 					this.settings.email = auth.email;
 					await this.saveSettings();
+					if (!this.isSyncing) {
+						this.setDefaultStatus();
+					} else {
+						this.renderStatusBar();
+					}
 				},
 			});
 
 			this.syncEngine = new SyncEngine({
 				app: this.app,
 				db: this.db,
+				pluginId: this.manifest.id,
 				settings: this.settings,
 				remote: store,
 			});
@@ -413,27 +478,50 @@ export default class FilenSyncPlugin extends Plugin {
 
 	private updateSyncProgress(label: string, progress: SyncProgress) {
 		this.syncProgress = progress;
-		const rows = this.syncViewState.rows.filter((row) => row.path !== progress.path);
-		rows.push({
-			path: progress.path,
-			status: progress.state,
-			operation: progress.operation,
-			detail: progress.detail,
-			at: progress.at,
-			active: progress.state === "active",
-		});
 		if (progress.phase === "scan") {
-			this.updateViewState(label, progress.detail, progress, rows);
-			this.setStatus(`${label}: ${progress.detail}`);
+			this.updateViewState({
+				...this.syncViewState,
+				label,
+				status: "Scanning",
+				detail: progress.detail,
+				progress,
+				latestScanAt: progress.at,
+			});
+			this.setStatus(`${label} in progress`, "syncing", progress.detail);
 			return;
 		}
 
-		this.updateViewState(label, `File ${progress.current} of ${progress.total}`, progress, rows);
-		this.setStatus(`${label} ${progress.current}/${progress.total}: ${progress.path}`);
+		let rows = this.syncViewState.rows;
+		let metrics = this.syncViewState.metrics;
+
+		if (shouldLogProgressRow(progress)) {
+			rows = appendActivityRow(rows, {
+				id: `${progress.at}-${this.syncActivityCounter++}`,
+				source: label,
+				path: progress.path,
+				status: progress.state,
+				operation: progress.operation,
+				detail: progress.detail,
+				at: progress.at,
+			});
+			metrics = updateMetrics(metrics, progress);
+		}
+
+		this.updateViewState({
+			...this.syncViewState,
+			label,
+			status: `File ${progress.current} of ${progress.total}`,
+			detail: progress.detail,
+			progress,
+			latestScanAt: progress.at,
+			metrics,
+			rows,
+		});
+		this.setStatus(`${label} in progress`, "syncing", `${progress.current}/${progress.total} · ${progress.path}`);
 	}
 
-	private updateViewState(label: string, status: string, progress: SyncProgress | null, rows: SyncViewState["rows"]) {
-		this.syncViewState = { label, status, progress, rows };
+	private updateViewState(state: SyncViewState) {
+		this.syncViewState = state;
 		const leaves = this.app.workspace.getLeavesOfType(FILEN_SYNC_PROGRESS_VIEW_TYPE);
 		for (const leaf of leaves) {
 			const view = leaf.view;
@@ -441,55 +529,6 @@ export default class FilenSyncPlugin extends Plugin {
 				view.updateState(this.syncViewState);
 			}
 		}
-	}
-
-	private async openProgressView() {
-		const existingLeaf = this.app.workspace.getLeavesOfType(FILEN_SYNC_PROGRESS_VIEW_TYPE)[0];
-		const leaf = existingLeaf ?? this.app.workspace.getLeftLeaf(false);
-		if (leaf === null) {
-			return;
-		}
-		await this.app.workspace.revealLeaf(leaf);
-		await leaf.setViewState({
-			type: FILEN_SYNC_PROGRESS_VIEW_TYPE,
-			active: true,
-		});
-		const view = leaf.view;
-		if (view instanceof FilenSyncProgressView) {
-			view.updateState(this.syncViewState);
-		}
-	}
-
-	private async openActiveFileVersions() {
-		const file = this.app.workspace.getActiveFile();
-		if (file === null) {
-			new Notice("No active file.");
-			return;
-		}
-
-		const remote = this.getSyncEngine().remote;
-		const modal = new FileVersionModal({
-			app: this.app,
-			remote,
-			path: file.path,
-			onRestored: async () => {
-				await this.db.deleteFile(file.path);
-				await this.pullRemoteChanges();
-			},
-			confirmRestore: async (version) => confirmAction(
-				this.app,
-				"Restore file version",
-				`Restore version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? Current content will be replaced.`,
-				"Restore",
-			),
-			confirmDelete: async (version) => confirmAction(
-				this.app,
-				"Delete file version",
-				`Delete version from ${new Date(version.timestamp).toLocaleString()} for ${file.path}? This cannot be undone.`,
-				"Delete",
-			),
-		});
-		modal.open();
 	}
 
 	private addFileMenuItems(menu: Menu, file: TAbstractFile) {
@@ -501,14 +540,14 @@ export default class FilenSyncPlugin extends Plugin {
 
 		menu.addItem((item) => {
 			item.setTitle("Filen: sync now");
-			item.setIcon("sync");
+			item.setIcon("refresh-cw");
 			item.onClick(() => {
 				void this.syncNow();
 			});
 		});
 
 		menu.addItem((item) => {
-			item.setTitle("Filen: open file versions");
+			item.setTitle("Filen: file versions");
 			item.setIcon("history");
 			item.onClick(() => {
 				void this.openFileVersions(file.path);
@@ -542,8 +581,124 @@ export default class FilenSyncPlugin extends Plugin {
 		modal.open();
 	}
 
-	private setStatus(value: string) {
-		this.statusBarItemEl?.setText(`Filen sync: ${value}`);
+	private initializeStatusBar(): void {
+		if (this.statusBarItemEl === null) {
+			return;
+		}
+
+		this.statusBarItemEl.empty();
+		this.statusBarItemEl.addClass("filen-sync-status-item");
+		this.statusBarIconEl = this.statusBarItemEl.createSpan({ cls: "filen-sync-status-icon" });
+		this.statusBarTextEl = this.statusBarItemEl.createSpan({ cls: "filen-sync-status-text" });
+		this.registerDomEvent(this.statusBarItemEl, "click", (event) => {
+			event.preventDefault();
+			event.stopPropagation();
+			this.openStatusBarMenu(event);
+		});
+	}
+
+	private openStatusBarMenu(event: MouseEvent): void {
+		const menu = new Menu();
+		menu.addItem((item) => {
+			item.setTitle("Sync now");
+			item.setIcon("refresh-cw");
+			item.onClick(() => {
+				void this.syncNow();
+			});
+		});
+		menu.addItem((item) => {
+			item.setTitle("Open sync activity");
+			item.setIcon("list");
+			item.onClick(() => {
+				void this.openProgressView();
+			});
+		});
+		menu.addItem((item) => {
+			item.setTitle(this.settings.syncOnSave ? "Disable sync on save" : "Enable sync on save");
+			item.setIcon("clock-3");
+			item.onClick(() => {
+				void this.toggleSyncOnSave();
+			});
+		});
+		menu.addSeparator();
+		menu.addItem((item) => {
+			item.setTitle(this.hasSavedAuth() ? "Open Filen Sync settings" : "Connect Filen");
+			item.setIcon("settings");
+			item.onClick(() => {
+				this.openSettingsTab();
+			});
+		});
+		menu.showAtMouseEvent(event);
+	}
+
+	private maybePromptForSetup(): void {
+		if (this.hasSavedAuth() || this.setupPromptShown) {
+			return;
+		}
+
+		this.setupPromptShown = true;
+		new FilenSyncSetupModal({
+			app: this.app,
+			onOpenSettings: () => this.openSettingsTab(),
+		}).open();
+	}
+
+	private setDefaultStatus(): void {
+		if (this.hasSavedAuth()) {
+			this.setStatus("Ready", "idle", `Connected as ${this.settings.email}.`, null);
+			return;
+		}
+
+		this.setStatus("Set up Filen", "idle", "Open settings to connect your Filen account.", null);
+	}
+
+	private setStatus(text: string, kind: StatusBarKind, detail: string, updatedAt: number | null = Date.now()): void {
+		this.statusBarState = { kind, text, detail, updatedAt };
+		this.renderStatusBar();
+	}
+
+	private renderStatusBar(): void {
+		if (this.statusBarItemEl === null || this.statusBarIconEl === null || this.statusBarTextEl === null) {
+			return;
+		}
+
+		setIcon(this.statusBarIconEl, iconForStatus(this.statusBarState.kind));
+		this.statusBarTextEl.setText(`Filen ${this.statusBarState.text}`);
+		this.statusBarItemEl.removeClass("is-idle", "is-syncing", "is-success", "is-warning", "is-error");
+		this.statusBarItemEl.addClass(`is-${this.statusBarState.kind}`);
+		const tooltip = this.buildStatusTooltip();
+		this.statusBarItemEl.setAttr("aria-label", tooltip);
+		this.statusBarItemEl.setAttr("title", tooltip);
+	}
+
+	private buildStatusTooltip(): string {
+		const lines = [
+			this.statusBarState.text,
+			this.statusBarState.detail,
+			this.hasSavedAuth() ? `Account: ${this.settings.email}` : "Account: not connected",
+			`Auto-sync: ${this.describeAutoSync()}`,
+		];
+
+		if (this.statusBarState.updatedAt !== null) {
+			lines.push(`Updated: ${formatStatusTime(this.statusBarState.updatedAt)}`);
+		}
+
+		lines.push("Click for actions.");
+		return lines.join("\n");
+	}
+
+	private describeAutoSync(): string {
+		const parts: string[] = [];
+		if (this.settings.syncOnSave) {
+			parts.push(`on save (${this.settings.syncOnSaveDelaySeconds}s delay)`);
+		}
+		if (this.settings.syncIntervalMinutes > 0) {
+			parts.push(`every ${this.settings.syncIntervalMinutes} min`);
+		}
+		if (this.settings.syncStartupDelaySeconds > 0) {
+			parts.push(`${this.settings.syncStartupDelaySeconds}s after startup`);
+		}
+		return parts.length > 0 ? parts.join(", ") : "off";
 	}
 }
 
@@ -596,3 +751,76 @@ class ConfirmActionModal extends Modal {
 		this.close();
 	}
 }
+
+const iconForStatus = (kind: StatusBarKind): string => {
+	switch (kind) {
+		case "syncing":
+			return "refresh-cw";
+		case "success":
+			return "check";
+		case "warning":
+			return "alert-triangle";
+		case "error":
+			return "x-circle";
+		case "idle":
+		default:
+			return "cloud";
+	}
+};
+
+const formatStatusTime = (epochMs: number): string =>
+	new Date(epochMs).toLocaleTimeString([], {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+	});
+
+const MAX_ACTIVITY_ROWS = 200;
+
+const createEmptyMetrics = (): SyncMetrics => ({
+	uploaded: 0,
+	downloaded: 0,
+	deleted: 0,
+	conflicts: 0,
+	failed: 0,
+});
+
+const shouldLogProgressRow = (progress: SyncProgress): progress is SyncProgress & { state: "done" | "failed" } =>
+	progress.phase === "sync" && (progress.state === "failed" || (progress.state === "done" && progress.operation !== "noop"));
+
+const appendActivityRow = (rows: SyncActivityRow[], row: SyncActivityRow): SyncActivityRow[] =>
+	[row, ...rows].slice(0, MAX_ACTIVITY_ROWS);
+
+const updateMetrics = (metrics: SyncMetrics, progress: SyncProgress): SyncMetrics => {
+	if (progress.state === "failed") {
+		return { ...metrics, failed: metrics.failed + 1 };
+	}
+
+	switch (progress.operation) {
+		case "upload":
+			return { ...metrics, uploaded: metrics.uploaded + 1 };
+		case "download":
+			return { ...metrics, downloaded: metrics.downloaded + 1 };
+		case "delete-local":
+		case "delete-remote":
+			return { ...metrics, deleted: metrics.deleted + 1 };
+		case "conflict":
+			return { ...metrics, conflicts: metrics.conflicts + 1 };
+		default:
+			return metrics;
+	}
+};
+
+const describeSyncCompletion = (label: string, result: string): string => {
+	if (result === "up to date") {
+		return `No file changes detected during the latest ${label.toLowerCase()}.`;
+	}
+
+	if (result.startsWith("nothing to ")) {
+		return `${capitalize(result)} during the latest ${label.toLowerCase()}.`;
+	}
+
+	return `${label} finished: ${result}.`;
+};
+
+const capitalize = (value: string): string => value.length === 0 ? value : value.charAt(0).toUpperCase() + value.slice(1);

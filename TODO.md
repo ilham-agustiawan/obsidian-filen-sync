@@ -17,30 +17,19 @@ Current implementation: direct Filen folder mirror.
 - [x] Conflict copy for both-sides edits
 - [x] `isSyncing` guard
 
-## Fix next
-
-- [x] Delete propagation in bidirectional mode
-  - local deleted + remote unchanged => delete remote
-  - remote deleted + local unchanged => delete local
-- [x] Delete propagation in one-way modes
-  - push mode should delete remote when local deleted from prev
-  - pull mode should delete local when remote deleted from prev
-- [x] Remote overwrite semantics: Filen SDK versions on same parent+name; walk deduplicates by path; no code change needed
-- [x] Failed row state: mark per-file failures in progress table before throwing
-
 ## Improve
 
-- [ ] File filtering: ignore rules for paths/folders beyond plugin data dir
+- [ ] **Improve UI/UX to be on par with Obsidian Sync**
+  - [x] **Consolidate UI elements**: Remove the 3 ribbon icons (`sync`, `history`, `timer`). Move background sync status to a single dynamic Status Bar item (like Obsidian Sync) with hover details.
+  - [x] **Command & Menu migration**: Keep "Sync Now" in Command Palette. Restrict "File versions" access exclusively to the File context menu (right-click).
+  - [x] **Settings revamp**: Reorganize settings into logical sections (`Account/Auth`, `Sync Strategy`, `Auto-sync`, `Actions`). Replace password input with a clear "Connected as [email] — Disconnect" state when authenticated.
+  - [x] **Activity Log**: Revamp `progress-view.ts` to look more like the native Sync Activity Modal, using standard icons (up/down arrows, trash) for visual clarity.
+  - [ ] **Conflict Resolution UX**: Build a UI/Modal to review conflicts side-by-side (Keep Local, Keep Remote, Keep Both) instead of only silently appending `(conflict)` suffixes.
+  - [x] **Onboarding**: Add a first-time setup prompt if `!hasSavedAuth()`.
+- [x] File filtering: ignore rules for paths/folders beyond plugin data dir
 - [x] Auto-sync settings: on save, interval, startup delay
 - [x] Debounced vault modify trigger
 - [x] Remote walk performance: reduce `stat()` calls if SDK exposes metadata in listing
 - [ ] Conflict strategy setting: keep newer, keep local, keep remote
 - [x] Safer local deletion path: use Obsidian file manager trash preference
-- [ ] Mobile runtime verification
-
-## Deferred
-
-- [ ] Plugin-level E2EE. Filen already encrypts account data.
-- [ ] Chunking/dedup. Direct mirror writes whole files.
-- [ ] Rename detection. Current model treats rename as delete + create.
-- [ ] Background/socket sync. Current SDK uses `connectToSocket: false`.
+- [x] Mobile runtime verification

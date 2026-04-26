@@ -1,5 +1,5 @@
 # vscode
-.vscode 
+.vscode
 
 # Intellij
 *.iml
@@ -8,6 +8,16 @@
 # npm
 node_modules
 tmp/
+
+# local agent / scratch files
+.pi/
+check_requires.*
+stub-*.js
+test-build*.mjs
+test-run*.mjs
+test-run*.cjs
+test-out*.js
+test-out*.cjs
 
 # Don't include the compiled main.js file in the repo.
 # They should be uploaded to GitHub releases instead.

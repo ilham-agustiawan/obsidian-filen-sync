@@ -1,20 +1,173 @@
-/*
+.filen-sync-status-item {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+	border-radius: 999px;
+	padding-inline: 6px;
+	transition: background-color 120ms ease, color 120ms ease;
+}
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.filen-sync-status-item:hover {
+	background: var(--background-modifier-hover);
+}
 
-If your plugin does not need CSS, delete this file.
+.filen-sync-status-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 14px;
+	height: 14px;
+}
 
-*/
+.filen-sync-status-item.is-syncing .filen-sync-status-icon {
+	animation: filen-sync-spin 1s linear infinite;
+}
+
+.filen-sync-status-item.is-success {
+	color: var(--text-success);
+}
+
+.filen-sync-status-item.is-warning {
+	color: var(--text-warning);
+}
+
+.filen-sync-status-item.is-error {
+	color: var(--text-error);
+}
+
+.filen-sync-status-text {
+	font-size: 0.9em;
+}
+
+.filen-sync-settings {
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+}
+
+.filen-sync-settings-hero {
+	padding: 16px 18px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 14px;
+	background: linear-gradient(180deg, color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary)) 0%, var(--background-primary) 100%);
+}
+
+.filen-sync-settings-hero-title {
+	margin: 0 0 6px;
+	padding: 0;
+	text-indent: 0;
+	font-size: 1.75em;
+	font-weight: 700;
+	line-height: 1.2;
+	color: var(--text-normal);
+}
+
+.filen-sync-settings-hero p {
+	margin: 0;
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+
+.filen-sync-settings-section {
+	padding: 16px 18px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 14px;
+	background: var(--background-primary-alt, var(--background-primary));
+}
+
+.filen-sync-settings-section-title {
+	margin: 0;
+	padding: 0;
+	text-indent: 0;
+	font-size: 1.05em;
+	font-weight: 700;
+	line-height: 1.3;
+	color: var(--text-normal);
+}
+
+.filen-sync-settings-section-description {
+	margin: 6px 0 14px;
+	color: var(--text-muted);
+	line-height: 1.45;
+}
+
+.filen-sync-settings-card {
+	margin-bottom: 16px;
+	padding: 14px;
+	border-radius: 12px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--background-secondary);
+}
+
+.filen-sync-settings-card.is-connected {
+	background: color-mix(in srgb, var(--interactive-accent) 7%, var(--background-secondary));
+}
+
+.filen-sync-settings-card-header {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	align-items: center;
+	margin-bottom: 8px;
+}
+
+.filen-sync-settings-card-badge {
+	display: inline-flex;
+	align-items: center;
+	padding: 2px 8px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--interactive-accent) 16%, transparent);
+	color: var(--text-accent);
+	font-size: 0.78em;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.filen-sync-settings-card-title {
+	font-weight: 700;
+}
+
+.filen-sync-settings-card-copy,
+.filen-sync-settings-card-note,
+.filen-sync-settings-note {
+	margin: 0;
+	color: var(--text-muted);
+	line-height: 1.45;
+}
+
+.filen-sync-settings-card-actions {
+	display: flex;
+	gap: 8px;
+	margin: 12px 0 10px;
+}
+
+.filen-sync-settings-note {
+	margin-top: 4px;
+	padding: 12px 14px;
+	border-radius: 10px;
+	background: var(--background-secondary);
+}
 
 .filen-sync-progress-view {
-	padding: 12px;
+	padding: 14px;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.filen-sync-activity-hero {
+	padding: 14px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 14px;
+	background: var(--background-secondary);
 	display: flex;
 	flex-direction: column;
 	gap: 12px;
 }
 
-.filen-sync-progress-header {
+.filen-sync-activity-hero-header {
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
@@ -29,11 +182,14 @@ If your plugin does not need CSS, delete this file.
 .filen-sync-progress-line,
 .filen-sync-progress-path,
 .filen-sync-progress-detail {
-	opacity: 0.85;
+	opacity: 0.9;
 	font-size: 0.92em;
 }
 
-.filen-sync-progress-detail {
+.filen-sync-progress-detail,
+.filen-sync-activity-row-detail,
+.filen-sync-activity-row-time,
+.filen-sync-activity-empty {
 	color: var(--text-muted);
 }
 
@@ -59,57 +215,156 @@ If your plugin does not need CSS, delete this file.
 	word-break: break-word;
 }
 
+.filen-sync-activity-metrics {
+	display: grid;
+	grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+	gap: 10px;
+}
+
+.filen-sync-activity-metric {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
+	background: var(--background-secondary);
+}
+
+.filen-sync-activity-metric-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 30px;
+	height: 30px;
+	border-radius: 10px;
+	background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+	color: var(--text-accent);
+}
+
+.filen-sync-activity-metric-body {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+}
+
+.filen-sync-activity-metric-value {
+	font-size: 1.15em;
+	font-weight: 700;
+	line-height: 1;
+}
+
+.filen-sync-activity-metric-label {
+	font-size: 0.82em;
+	color: var(--text-muted);
+}
+
 .filen-sync-progress-filters {
 	display: flex;
 	flex-wrap: wrap;
-	gap: 8px;
+	gap: 10px;
 }
 
 .filen-sync-progress-filter {
 	display: inline-flex;
 	align-items: center;
-	gap: 6px;
+	gap: 8px;
 	color: var(--text-muted);
 	font-size: 0.85em;
 }
 
-.filen-sync-progress-table-wrap {
-	overflow: auto;
-	border: 1px solid var(--background-modifier-border);
-	border-radius: 10px;
+.filen-sync-progress-filter select {
+	max-width: 180px;
 }
 
-.filen-sync-progress-table {
-	width: 100%;
-	border-collapse: collapse;
-	font-size: 0.88em;
+.filen-sync-activity-list {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
 }
 
-.filen-sync-progress-table th,
-.filen-sync-progress-table td {
-	padding: 8px 10px;
-	border-bottom: 1px solid var(--background-modifier-border);
-	vertical-align: top;
+.filen-sync-activity-section {
+	display: flex;
+	flex-direction: column;
+	gap: 10px;
 }
 
-.filen-sync-progress-table th {
-	text-align: left;
-	font-size: 0.78em;
-	text-transform: uppercase;
-	letter-spacing: 0.04em;
+.filen-sync-activity-section-title {
+	font-weight: 700;
+	font-size: 0.96em;
+}
+
+.filen-sync-activity-section-description {
 	color: var(--text-muted);
+	font-size: 0.88em;
+	line-height: 1.45;
+}
+
+.filen-sync-activity-row {
+	display: grid;
+	grid-template-columns: auto minmax(0, 1fr) auto;
+	gap: 12px;
+	align-items: start;
+	padding: 12px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 12px;
 	background: var(--background-secondary);
-	position: sticky;
-	top: 0;
-	z-index: 1;
 }
 
-.filen-sync-progress-row.is-active {
-	background: color-mix(in srgb, var(--interactive-accent) 10%, transparent);
+.filen-sync-activity-row.is-active {
+	border-color: color-mix(in srgb, var(--interactive-accent) 40%, var(--background-modifier-border));
+	background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-secondary));
 }
 
-.filen-sync-progress-file {
-	word-break: break-word;
+.filen-sync-activity-row.is-failed {
+	border-color: color-mix(in srgb, var(--text-error) 45%, var(--background-modifier-border));
+}
+
+.filen-sync-activity-row-icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 34px;
+	height: 34px;
+	border-radius: 10px;
+	background: var(--background-primary);
+	color: var(--text-muted);
+}
+
+.filen-sync-activity-row-content {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+}
+
+.filen-sync-activity-row-top {
+	display: flex;
+	justify-content: space-between;
+	gap: 10px;
+	align-items: baseline;
+}
+
+.filen-sync-activity-row-title {
+	font-weight: 700;
+}
+
+.filen-sync-activity-row-path,
+.filen-sync-version-path {
+	font-family: var(--font-monospace);
+	font-size: 0.86em;
+	overflow-wrap: anywhere;
+}
+
+.filen-sync-activity-row-path {
+	color: var(--text-normal);
+}
+
+.filen-sync-activity-empty {
+	padding: 20px 16px;
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: 12px;
+	text-align: center;
 }
 
 .filen-sync-progress-badge {
@@ -150,6 +405,30 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-muted);
 }
 
+.filen-sync-setup-modal {
+	width: min(560px, calc(100vw - 32px));
+}
+
+.filen-sync-setup-copy,
+.filen-sync-setup-note {
+	color: var(--text-muted);
+	line-height: 1.5;
+}
+
+.filen-sync-setup-steps {
+	margin: 0;
+	padding-left: 1.3em;
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.filen-sync-setup-note {
+	padding: 12px 14px;
+	border-radius: 10px;
+	background: var(--background-secondary);
+}
+
 .filen-sync-version-modal {
 	width: min(720px, calc(100vw - 32px));
 }
@@ -170,9 +449,6 @@ If your plugin does not need CSS, delete this file.
 	border-radius: 6px;
 	background: var(--background-secondary);
 	color: var(--text-muted);
-	font-family: var(--font-monospace);
-	font-size: 0.86em;
-	overflow-wrap: anywhere;
 }
 
 .filen-sync-version-status,
@@ -255,17 +531,6 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-error);
 }
 
-@media (max-width: 520px) {
-	.filen-sync-version-row {
-		grid-template-columns: 1fr;
-	}
-
-	.filen-sync-version-row button,
-	.filen-sync-version-actions {
-		width: 100%;
-	}
-}
-
 .filen-sync-preview-modal {
 	width: min(860px, calc(100vw - 32px));
 	height: min(80vh, 800px);
@@ -299,4 +564,36 @@ If your plugin does not need CSS, delete this file.
 	color: var(--text-muted);
 	font-style: italic;
 	padding: 16px;
+}
+
+@media (max-width: 720px) {
+	.filen-sync-activity-row {
+		grid-template-columns: auto minmax(0, 1fr);
+	}
+
+	.filen-sync-activity-row .filen-sync-progress-badge {
+		grid-column: 2;
+		justify-self: start;
+	}
+}
+
+@media (max-width: 520px) {
+	.filen-sync-version-row {
+		grid-template-columns: 1fr;
+	}
+
+	.filen-sync-version-row button,
+	.filen-sync-version-actions,
+	.filen-sync-settings-card-actions {
+		width: 100%;
+	}
+}
+
+@keyframes filen-sync-spin {
+	from {
+		transform: rotate(0deg);
+	}
+	to {
+		transform: rotate(360deg);
+	}
 }
