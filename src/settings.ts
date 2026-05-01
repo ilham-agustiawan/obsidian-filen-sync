@@ -156,7 +156,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		containerEl.addClass("filen-sync-settings");
 
 		const intro = containerEl.createDiv({ cls: "filen-sync-settings-hero" });
-		intro.createDiv({ text: "Filen Sync", cls: "filen-sync-settings-hero-title" });
+		intro.createDiv({ text: "Obsidian Filen Sync", cls: "filen-sync-settings-hero-title" });
 		intro.createEl("p", {
 			text: "Keep this vault mirrored in Filen with an Obsidian-native flow: connect once, review activity, then run sync on demand or in the background.",
 		});
@@ -289,9 +289,9 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		const note = section.createDiv({ cls: "filen-sync-settings-note" });
 		note.createEl("strong", { text: "Conflict handling" });
-		note.createSpan({ text: " When both sides changed, Filen Sync keeps a local conflict copy before applying the chosen side." });
+		note.createSpan({ text: " When both sides changed, Obsidian Filen Sync keeps a local conflict copy before applying the chosen side." });
 		section.createEl("p", {
-			text: "The Filen Sync plugin data folder is always ignored automatically.",
+			text: "The Obsidian Filen Sync plugin data folder is always ignored automatically.",
 			cls: "filen-sync-settings-note",
 		});
 	}

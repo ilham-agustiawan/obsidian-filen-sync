@@ -1,5 +1,13 @@
 import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, setIcon } from "obsidian";
 import { SyncDb } from "./db";
+import {
+	generateReport,
+	formatReportForClipboard,
+	getLastError,
+	hasCriticalFailure,
+	runStartupChecks,
+	setLastError,
+} from "./diagnostics";
 import { FilenRemoteFs } from "./fs-remote";
 import { FileVersionModal } from "./file-version-modal";
 import { FilenSyncSetupModal } from "./onboarding-modal";
@@ -12,6 +20,61 @@ import {
 } from "./progress-view";
 import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
 import { SyncEngine, type SyncProgress } from "./sync-engine";
+
+/**
+ * Retry a function with exponential backoff for transient errors.
+ */
+async function withRetry<T>(
+	fn: () => Promise<T>,
+	options: { maxRetries?: number; baseDelayMs?: number; shouldRetry?: (error: unknown) => boolean } = {},
+): Promise<T> {
+	const { maxRetries = 2, baseDelayMs = 1000 } = options;
+	const shouldRetry = options.shouldRetry ?? isTransientError;
+
+	let lastError: unknown;
+	for (let attempt = 0; attempt <= maxRetries; attempt++) {
+		try {
+			return await fn();
+		} catch (error) {
+			lastError = error;
+			if (attempt === maxRetries || !shouldRetry(error)) {
+				throw error;
+			}
+			const delay = baseDelayMs * Math.pow(2, attempt);
+			await new Promise((resolve) => setTimeout(resolve, delay));
+		}
+	}
+	throw lastError;
+}
+
+/**
+ * Heuristic for transient errors that are worth retrying.
+ */
+function isTransientError(error: unknown): boolean {
+	const message = error instanceof Error ? error.message : String(error);
+	const lower = message.toLowerCase();
+	const transientPatterns = [
+		"network",
+		"timeout",
+		"econnreset",
+		"econnrefused",
+		"etimedout",
+		"enotfound",
+		"dns",
+		"socket",
+		"tls",
+		"abort",
+		"fetch failed",
+		"too many requests",
+		"rate limit",
+		"503",
+		"502",
+		"504",
+		"429",
+		"internal server error",
+	];
+	return transientPatterns.some((pattern) => lower.includes(pattern));
+}
 
 type StatusBarKind = "idle" | "syncing" | "success" | "warning" | "error";
 
@@ -117,6 +180,14 @@ export default class FilenSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "copy-diagnostics-report",
+			name: "Copy diagnostics report",
+			callback: () => {
+				void this.copyDiagnosticsReport();
+			},
+		});
+
 		this.registerEvent(
 			this.app.workspace.on("file-menu", (menu, file) => {
 				this.addFileMenuItems(menu, file);
@@ -128,6 +199,7 @@ export default class FilenSyncPlugin extends Plugin {
 		this.renderStatusBar();
 		this.app.workspace.onLayoutReady(() => {
 			this.maybePromptForSetup();
+			void this.runStartupDiagnostics();
 		});
 	}
 
@@ -172,7 +244,7 @@ export default class FilenSyncPlugin extends Plugin {
 		this.settings = FilenSyncSettings.fromSaved(saved);
 
 		if (this.settings.deviceId.length === 0) {
-			this.settings.deviceId = crypto.randomUUID();
+			this.settings.deviceId = window.crypto.randomUUID();
 			await this.saveSettings();
 		}
 	}
@@ -232,6 +304,70 @@ export default class FilenSyncPlugin extends Plugin {
 		}).setting;
 		settingManager.open();
 		settingManager.openTabById(this.manifest.id);
+	}
+
+	/**
+	 * Copy a sanitized diagnostics report to the clipboard.
+	 * No vault contents, file paths, or auth secrets are included.
+	 */
+	public async copyDiagnosticsReport(): Promise<void> {
+		try {
+			const report = await generateReport({
+				app: this.app,
+				pluginVersion: this.manifest.version,
+				settingsSnap: {
+					email: this.settings.email,
+					remoteRoot: this.settings.remoteRoot,
+					vaultName: this.settings.vaultName,
+					hasAuth: this.hasSavedAuth(),
+					syncOnSave: this.settings.syncOnSave,
+					syncOnSaveDelaySeconds: this.settings.syncOnSaveDelaySeconds,
+					syncIntervalMinutes: this.settings.syncIntervalMinutes,
+					syncStartupDelaySeconds: this.settings.syncStartupDelaySeconds,
+					ignorePatternsCount: this.settings.ignorePatterns.length,
+				},
+				lastError: getLastError(),
+			});
+
+			const text = formatReportForClipboard(report);
+			await navigator.clipboard.writeText(text);
+			new Notice("Diagnostics report copied to clipboard.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Failed to generate report: ${message}`);
+			console.error("Obsidian Filen Sync: diagnostics report failed", error);
+		}
+	}
+
+	/**
+	 * Run environment checks on startup and show a notice if something is wrong.
+	 * Only fires after layout is ready so we can show UI.
+	 */
+	private async runStartupDiagnostics(): Promise<void> {
+		try {
+			const checks = await runStartupChecks();
+			const failures = checks.filter((check) => !check.ok);
+
+			if (failures.length === 0) return;
+
+			// Log all results for debugging
+			console.log("Obsidian Filen Sync startup diagnostics:", checks);
+
+			if (hasCriticalFailure(checks)) {
+				new Notice(
+					`Obsidian Filen Sync: critical issue detected. Open settings → Copy diagnostics report for details.`,
+					10000,
+				);
+			} else if (failures.length > 0) {
+				const label = failures[0]?.label ?? "Unknown";
+				new Notice(
+					`Obsidian Filen Sync: "${label}" check failed. Some features may not work.`,
+					8000,
+				);
+			}
+		} catch {
+			// Silent -- diagnostics are best-effort and should never block plugin load
+		}
 	}
 
 	public async openProgressView() {
@@ -396,7 +532,7 @@ export default class FilenSyncPlugin extends Plugin {
 		if (!silent) void this.openProgressView();
 		try {
 			const engine = this.getSyncEngine();
-			const result = await task(engine);
+			const result = await withRetry(() => task(engine));
 			this.syncProgress = null;
 			this.updateViewState({
 				...this.syncViewState,
@@ -414,6 +550,7 @@ export default class FilenSyncPlugin extends Plugin {
 			if (!silent) new Notice(`${label}: ${result}`);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
+			setLastError(`[${label}] ${message}`);
 			this.syncProgress = null;
 			this.updateViewState({
 				...this.syncViewState,
@@ -425,7 +562,7 @@ export default class FilenSyncPlugin extends Plugin {
 			});
 			this.setStatus(`${label} failed`, "error", message);
 			console.error(`${label} failed`, error);
-			if (message.includes("API key") || message.includes("auth expired")) {
+			if (message.includes("API key") || message.includes("api key") || message.includes("auth expired")) {
 				this.syncEngine?.close();
 				this.syncEngine = null;
 			}
@@ -622,7 +759,7 @@ export default class FilenSyncPlugin extends Plugin {
 		});
 		menu.addSeparator();
 		menu.addItem((item) => {
-			item.setTitle(this.hasSavedAuth() ? "Open Filen Sync settings" : "Connect Filen");
+			item.setTitle(this.hasSavedAuth() ? "Open Obsidian Filen Sync settings" : "Connect Filen");
 			item.setIcon("settings");
 			item.onClick(() => {
 				this.openSettingsTab();
@@ -645,7 +782,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 	private setDefaultStatus(): void {
 		if (this.hasSavedAuth()) {
-			this.setStatus("Ready", "idle", `Connected as ${this.settings.email}.`, null);
+			this.setStatus("Ready", "success", `Connected as ${this.settings.email}.`, null);
 			return;
 		}
 
@@ -662,19 +799,28 @@ export default class FilenSyncPlugin extends Plugin {
 			return;
 		}
 
-		setIcon(this.statusBarIconEl, iconForStatus(this.statusBarState.kind));
-		this.statusBarTextEl.setText(`Filen ${this.statusBarState.text}`);
+		const iconOnly = isAllFilesSyncedStatus(this.statusBarState);
+		setIcon(this.statusBarIconEl, iconForStatus(this.statusBarState, iconOnly));
+		this.statusBarTextEl.setText(iconOnly ? "" : `Filen ${this.statusBarState.text}`);
 		this.statusBarItemEl.removeClass("is-idle", "is-syncing", "is-success", "is-warning", "is-error");
 		this.statusBarItemEl.addClass(`is-${this.statusBarState.kind}`);
+		this.statusBarItemEl.toggleClass("is-icon-only", iconOnly);
 		const tooltip = this.buildStatusTooltip();
 		this.statusBarItemEl.setAttr("aria-label", tooltip);
 		this.statusBarItemEl.setAttr("title", tooltip);
 	}
 
 	private buildStatusTooltip(): string {
+		const statusText = isAllFilesSyncedStatus(this.statusBarState)
+			? "All files synced"
+			: this.statusBarState.text;
+		const detailText = this.statusBarState.text === "Ready"
+			? "No pending changes detected."
+			: this.statusBarState.detail;
+
 		const lines = [
-			this.statusBarState.text,
-			this.statusBarState.detail,
+			statusText,
+			detailText,
 			this.hasSavedAuth() ? `Account: ${this.settings.email}` : "Account: not connected",
 			`Auto-sync: ${this.describeAutoSync()}`,
 		];
@@ -752,8 +898,15 @@ class ConfirmActionModal extends Modal {
 	}
 }
 
-const iconForStatus = (kind: StatusBarKind): string => {
-	switch (kind) {
+const isAllFilesSyncedStatus = (state: StatusBarState): boolean =>
+	state.kind === "success" && (state.text === "up to date" || state.text === "Ready");
+
+const iconForStatus = (state: StatusBarState, iconOnly = false): string => {
+	if (iconOnly) {
+		return "list-checks";
+	}
+
+	switch (state.kind) {
 		case "syncing":
 			return "refresh-cw";
 		case "success":

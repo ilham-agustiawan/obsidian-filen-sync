@@ -1,8 +1,8 @@
-# Filen Sync
+# Obsidian Filen Sync
 
 Manual Obsidian vault sync through a Filen folder mirror.
 
-Filen Sync is an Obsidian community plugin for syncing vault files to a Filen
+Obsidian Filen Sync is an Obsidian community plugin for syncing vault files to a Filen
 folder. It uses a direct remote mirror, stores sync state locally, and keeps
 conflict copies when both local and remote files changed.
 
@@ -59,11 +59,11 @@ Copy these files to your vault plugin folder:
   manifest.json
 ```
 
-Then enable **Filen Sync** in **Settings -> Community plugins**.
+Then enable **Obsidian Filen Sync** in **Settings -> Community plugins**.
 
 ## Setup
 
-1. Open **Settings -> Filen Sync**.
+1. Open **Settings -> Obsidian Filen Sync**.
 2. Enter Filen email.
 3. Enter password and optional 2FA code.
 4. Keep the default remote folder, or set a custom one.
@@ -79,12 +79,12 @@ clear connected state with a **Disconnect** action.
 
 | Command | Description |
 | --- | --- |
-| **Filen Sync: Sync now** | Compare local and remote. Apply changed side. Keep conflict copies. |
-| **Filen Sync: Push changed local files** | Upload local changes only. |
-| **Filen Sync: Pull changed remote files** | Download remote changes only. |
-| **Filen Sync: Test Filen connection** | Verify auth and remote write/delete access. |
-| **Filen Sync: Open sync activity** | Show current or last sync activity rows. |
-| **Filen Sync: Toggle sync on save** | Turn save-triggered background sync on or off. |
+| **Obsidian Filen Sync: Sync now** | Compare local and remote. Apply changed side. Keep conflict copies. |
+| **Obsidian Filen Sync: Push changed local files** | Upload local changes only. |
+| **Obsidian Filen Sync: Pull changed remote files** | Download remote changes only. |
+| **Obsidian Filen Sync: Test Filen connection** | Verify auth and remote write/delete access. |
+| **Obsidian Filen Sync: Open sync activity** | Show current or last sync activity rows. |
+| **Obsidian Filen Sync: Toggle sync on save** | Turn save-triggered background sync on or off. |
 
 ## UI
 

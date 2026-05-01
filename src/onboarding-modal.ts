@@ -14,7 +14,7 @@ export class FilenSyncSetupModal extends Modal {
 	onOpen(): void {
 		this.contentEl.empty();
 
-		this.contentEl.createEl("h2", { text: "Set up Filen Sync" });
+		this.contentEl.createEl("h2", { text: "Set up Obsidian Filen Sync" });
 		this.contentEl.createEl("p", {
 			text: "Connect your Filen account, choose the remote folder for this vault, then run your first sync.",
 			cls: "filen-sync-setup-copy",

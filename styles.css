@@ -12,12 +12,21 @@
 	background: var(--background-modifier-hover);
 }
 
+.filen-sync-status-item.is-icon-only {
+	gap: 0;
+	padding-inline: 4px;
+}
+
 .filen-sync-status-icon {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
 	width: 14px;
 	height: 14px;
+}
+
+.filen-sync-status-item.is-icon-only .filen-sync-status-text {
+	display: none;
 }
 
 .filen-sync-status-item.is-syncing .filen-sync-status-icon {
