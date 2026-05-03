@@ -1,4 +1,4 @@
-import { App, TAbstractFile, TFile, normalizePath } from "obsidian";
+import { App, TAbstractFile, TFile, TFolder, normalizePath } from "obsidian";
 import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
 import type { SyncDb } from "./db";
 import type { RemoteEntry, RemoteFs } from "./fs-remote";
@@ -23,11 +23,21 @@ type SyncResult = {
 	conflicts: number;
 };
 
+export type ConflictCopy = {
+	originalPath: string;
+	copyPath: string;
+};
+
+export type SyncOutcome = SyncResult & {
+	conflictCopies: ConflictCopy[];
+};
+
 type EntrySyncResult = SyncResult & {
 	detail: string;
 	operation: SyncOperation;
 	/** Pre-computed SHA-256 hash (for upload operations). */
 	hash?: string;
+	conflictCopyPath?: string;
 };
 
 export type SyncMode = "bidirectional" | "push-local" | "pull-remote";
@@ -80,6 +90,16 @@ type LocalEntry = {
 	file: TAbstractFile;
 };
 
+type LocalScan = {
+	files: Map<string, LocalEntry>;
+	dirs: Set<string>;
+};
+
+type RemoteScan = {
+	files: Map<string, RemoteEntry>;
+	dirs: Set<string>;
+};
+
 type PrevRecord = {
 	path: string;
 	mtime: number;
@@ -113,7 +133,7 @@ export class SyncEngine {
 	async sync(
 		mode: SyncMode = "bidirectional",
 		onProgress?: (progress: SyncProgress) => void,
-	): Promise<SyncResult> {
+	): Promise<SyncOutcome> {
 		await this.ensureRemote();
 		const pathFilter = createSyncPathFilter({
 			configDir: this.config.app.vault.configDir,
@@ -128,7 +148,7 @@ export class SyncEngine {
 		]);
 		const prev = filterPrevRecords(prevRecords, pathFilter);
 		onProgress?.(scanProgress(2, "Sync database", "Reading previous sync state"));
-		const entries = this.ensemble(local, remote, prev);
+		const entries = this.ensemble(local.files, remote.files, prev);
 		onProgress?.(scanProgress(
 			3,
 			"Change plan",
@@ -142,9 +162,13 @@ export class SyncEngine {
 
 		let applied = 0;
 		let conflicts = 0;
+		const conflictCopies: ConflictCopy[] = [];
 		const total = entries.length;
 
 		try {
+			applied += await this.syncDirectories(mode, local.dirs, remote.dirs);
+
+
 			for (const [index, entry] of entries.entries()) {
 				onProgress?.({
 					current: index + 1,
@@ -195,6 +219,9 @@ export class SyncEngine {
 				}
 				applied += result.applied;
 				conflicts += result.conflicts;
+				if (result.conflictCopyPath !== undefined) {
+					conflictCopies.push({ originalPath: entry.path, copyPath: result.conflictCopyPath });
+				}
 				onProgress?.({
 					current: index + 1,
 					total,
@@ -208,7 +235,7 @@ export class SyncEngine {
 			}
 
 			await this.config.journal.completeBatch(batchId);
-			return { applied, conflicts };
+			return { applied, conflicts, conflictCopies };
 		} catch (err) {
 			// Leave batch in-progress so crash recovery can detect it
 			console.error("Obsidian Filen Sync: sync batch interrupted", err);
@@ -216,42 +243,71 @@ export class SyncEngine {
 		}
 	}
 
-	private async walkLocal(pathFilter: SyncPathFilter): Promise<Map<string, LocalEntry>> {
-		const entries = new Map<string, LocalEntry>();
+	private async walkLocal(pathFilter: SyncPathFilter): Promise<LocalScan> {
+		const files = new Map<string, LocalEntry>();
+		const dirs = new Set<string>();
 		for (const file of this.config.app.vault.getAllLoadedFiles()) {
-			if (pathFilter.isIgnored(file.path)) {
+			if (file.path.length === 0 || pathFilter.isIgnored(file.path)) {
 				continue;
 			}
 
 			if (file instanceof TFile) {
-				entries.set(file.path, {
+				files.set(file.path, {
 					path: file.path,
 					mtime: file.stat.mtime,
 					ctime: file.stat.ctime,
 					size: file.stat.size,
 					file,
 				});
+			} else if (file instanceof TFolder) {
+				dirs.add(file.path);
 			}
 		}
 
-		return entries;
+		return { files, dirs };
 	}
 
-	private async walkRemote(pathFilter: SyncPathFilter): Promise<Map<string, RemoteEntry>> {
-		const entries = new Map<string, RemoteEntry>();
+	private async walkRemote(pathFilter: SyncPathFilter): Promise<RemoteScan> {
+		const files = new Map<string, RemoteEntry>();
+		const dirs = new Set<string>();
 		for (const entry of await this.config.remote.walk()) {
 			if (pathFilter.isIgnored(entry.path)) {
 				continue;
 			}
 
 			if (entry.isDir) {
+				dirs.add(entry.path);
 				continue;
 			}
 
-			entries.set(entry.path, entry);
+			files.set(entry.path, entry);
 		}
 
-		return entries;
+		return { files, dirs };
+	}
+
+	private async syncDirectories(mode: SyncMode, localDirs: Set<string>, remoteDirs: Set<string>): Promise<number> {
+		let applied = 0;
+
+		if (mode !== "pull-remote") {
+			for (const path of sortDirs(localDirs)) {
+				if (!remoteDirs.has(path)) {
+					await this.config.remote.mkdir(path);
+					applied++;
+				}
+			}
+		}
+
+		if (mode !== "push-local") {
+			for (const path of sortDirs(remoteDirs)) {
+				if (!localDirs.has(path)) {
+					await ensureLocalDirectory(this.config.app, path);
+					applied++;
+				}
+			}
+		}
+
+		return applied;
 	}
 
 	private ensemble(
@@ -323,11 +379,11 @@ export class SyncEngine {
 		if (prev === undefined) {
 			if (mode === "push-local") {
 				const hash = await this.hashLocal(local);
-				return { applied: 1, conflicts: 0, detail: "Uploaded local file", operation: "upload", hash };
+				return { applied: 1, conflicts: 0, detail: "Uploaded local file and replaced remote file", operation: "upload", hash };
 			}
 
 			if (mode === "pull-remote") {
-				return { applied: 1, conflicts: 0, detail: "Downloaded remote file", operation: "download" };
+				return { applied: 1, conflicts: 0, detail: "Downloaded remote file and replaced local file", operation: "download" };
 			}
 
 			const newer = chooseNewer(local, remote);
@@ -425,8 +481,9 @@ export class SyncEngine {
 
 		// Handle conflict (both sides exist, we need to apply the chosen side)
 		if (plan.operation === "conflict") {
+			let conflictCopyPath: string | undefined;
 			if (local !== undefined && remote !== undefined) {
-				await this.writeConflictCopy(local.path);
+				conflictCopyPath = await this.writeConflictCopy(local.path) ?? undefined;
 				const newer = chooseNewer(local, remote);
 				if ((newer === "local" && plan.detail.includes("uploaded")) || plan.hash !== undefined) {
 					const hash = plan.hash ?? await this.hashLocal(local);
@@ -441,7 +498,7 @@ export class SyncEngine {
 			} else if (local === undefined && remote !== undefined) {
 				await this.pullRemote(entry.path, remote);
 			}
-			return plan;
+			return conflictCopyPath !== undefined ? { ...plan, conflictCopyPath } : plan;
 		}
 
 		// Handle skipped (noop) - cleanup db for files missing on both sides
@@ -530,19 +587,20 @@ export class SyncEngine {
 		return sha256Hex(content instanceof Uint8Array ? content : new Uint8Array(content));
 	}
 
-	private async writeConflictCopy(path: string): Promise<void> {
+	private async writeConflictCopy(path: string): Promise<string | null> {
 		const file = this.config.app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) {
-			return;
+			return null;
 		}
 
-		const conflictPath = conflictCopyPath(file.path, this.config.settings.deviceId, Date.now());
+		const copyPath = conflictCopyPath(file.path, this.config.settings.deviceId, Date.now());
 		const content = await this.config.app.vault.readBinary(file);
-		await ensureLocalFolder(this.config.app, conflictPath);
-		await this.config.app.vault.adapter.writeBinary(conflictPath, content, {
+		await ensureLocalFolder(this.config.app, copyPath);
+		await this.config.app.vault.adapter.writeBinary(copyPath, content, {
 			mtime: file.stat.mtime,
 			ctime: file.stat.ctime,
 		});
+		return copyPath;
 	}
 
 	private async deleteLocal(path: string): Promise<void> {
@@ -595,7 +653,7 @@ export class SyncEngine {
 			this.config.db.getAllFiles(),
 		]);
 		const prev = filterPrevRecords(prevRecords, pathFilter);
-		const entries = this.ensemble(local, remote, prev);
+		const entries = this.ensemble(local.files, remote.files, prev);
 
 		const planEntries: SyncPlanEntry[] = [];
 		const summary = { uploads: 0, downloads: 0, localDeletes: 0, remoteDeletes: 0, conflicts: 0, skipped: 0, total: entries.length };
@@ -698,10 +756,20 @@ const conflictCopyPath = (path: string, deviceId: string, timestamp: number): st
 
 const safePathSegment = (value: string): string => value.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 
+const sortDirs = (dirs: Set<string>): string[] =>
+	[...dirs].sort((left, right) => left.split("/").length - right.split("/").length || left.localeCompare(right));
+
 const ensureLocalFolder = async (app: App, path: string): Promise<void> => {
 	const parts = normalizePath(path).split("/");
 	parts.pop();
+	await ensureLocalDirectoryParts(app, parts);
+};
 
+const ensureLocalDirectory = async (app: App, path: string): Promise<void> => {
+	await ensureLocalDirectoryParts(app, normalizePath(path).split("/").filter((part) => part.length > 0));
+};
+
+const ensureLocalDirectoryParts = async (app: App, parts: string[]): Promise<void> => {
 	let current = "";
 	for (const part of parts) {
 		current = current.length === 0 ? part : `${current}/${part}`;
