@@ -53,12 +53,24 @@ const context = await esbuild.context({
 				assert: true,
 				constants: true,
 				https: true,
-				url: true
+				url: true,
+				buffer: true,
+				process: true,
+				http: true,
+				vm: true,
+				zlib: true,
+				string_decoder: true,
+				timers: true,
+				tls: true
 			}
 		})
 	],
 	format: "cjs",
 	target: "es2018",
+	define: {
+		"process.env.NODE_ENV": JSON.stringify(prod ? "production" : "development"),
+		"global": "window",
+	},
 	logLevel: "info",
 	sourcemap: prod ? false : "inline",
 	treeShaking: true,

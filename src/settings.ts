@@ -8,7 +8,20 @@ export type SyncedFileRecord = {
 	ctime: number;
 	size: number;
 	hash?: string;
+	/** Remote UUID assigned by Filen. Tracked to detect remote renames. */
+	remoteUuid?: string;
+	/** Unix-ms timestamp of the last successful sync operation for this file. */
+	lastSyncAt?: number;
+	/** Which side was last known to have the canonical version. */
+	lastKnownSide?: "local" | "remote" | "both";
 };
+
+/**
+ * Schema version for the sync-state database.
+ * Bump this when SyncedFileRecord or the DB layout changes.
+ * Migrations run automatically when the stored version is lower.
+ */
+export const SYNC_DB_SCHEMA_VERSION = 1;
 
 export type FilenAuth = {
 	email: string;
@@ -158,6 +171,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const intro = containerEl.createDiv({ cls: "filen-sync-settings-hero" });
 		intro.createDiv({ text: "Obsidian Filen Sync", cls: "filen-sync-settings-hero-title" });
 		intro.createEl("p", {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			text: "Keep this vault mirrored in Filen with an Obsidian-native flow: connect once, review activity, then run sync on demand or in the background.",
 		});
 
@@ -183,6 +197,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 				cls: "filen-sync-settings-card-title",
 			});
 			card.createEl("p", {
+				// eslint-disable-next-line obsidianmd/ui/sentence-case
 				text: "Your saved Filen session is stored in plugin data so you do not need to re-enter your password on every launch.",
 				cls: "filen-sync-settings-card-copy",
 			});
@@ -202,6 +217,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 			new Setting(section)
 				.setName("Account email")
+				// eslint-disable-next-line obsidianmd/ui/sentence-case
 				.setDesc("Saved with your authenticated Filen session.")
 				.addText((text) => text.setValue(this.plugin.settings.email).setDisabled(true));
 			return;
@@ -209,10 +225,12 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Email")
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc("Your Filen account email.")
 			.addText((text) =>
 				text
-					.setPlaceholder("name@example.com")
+					// eslint-disable-next-line obsidianmd/ui/sentence-case
+				.setPlaceholder("name@example.com")
 					.setValue(this.plugin.settings.email)
 					.onChange(async (value) => {
 						this.plugin.settings.email = value.trim();
@@ -234,6 +252,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Two-factor code")
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc("Only needed if your Filen account uses 2FA.")
 			.addText((text) =>
 				text.setPlaceholder("123456").onChange((value) => {
@@ -264,6 +283,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Vault name")
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc("Stored in the sync log so Filen can tell one vault device from another.")
 			.addText((text) =>
 				text.setValue(this.plugin.settings.vaultName).onChange(async (value) => {
@@ -291,6 +311,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		note.createEl("strong", { text: "Conflict handling" });
 		note.createSpan({ text: " When both sides changed, Obsidian Filen Sync keeps a local conflict copy before applying the chosen side." });
 		section.createEl("p", {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			text: "The Obsidian Filen Sync plugin data folder is always ignored automatically.",
 			cls: "filen-sync-settings-note",
 		});
@@ -372,6 +393,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Test connection")
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc("Verify that your Filen account and remote folder are reachable.")
 			.addButton((button) =>
 				button.setButtonText("Test").onClick(() => {
@@ -403,6 +425,15 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.addButton((button) =>
 				button.setButtonText("Push").onClick(() => {
 					void this.plugin.pushLocalChanges();
+				}),
+			);
+
+		new Setting(section)
+			.setName("Preview sync plan")
+			.setDesc("See what would change before running sync.")
+			.addButton((button) =>
+				button.setButtonText("Preview").onClick(() => {
+					void this.plugin.previewSyncPlan();
 				}),
 			);
 

@@ -3,6 +3,7 @@ import { createSyncPathFilter, type SyncPathFilter } from "./path-filters";
 import type { SyncDb } from "./db";
 import type { RemoteEntry, RemoteFs } from "./fs-remote";
 import type { SyncedFileRecord } from "./settings";
+import type { SyncJournal } from "./sync-journal";
 
 type SyncEngineConfig = {
 	app: App;
@@ -14,6 +15,7 @@ type SyncEngineConfig = {
 		ignorePatterns: string[];
 	};
 	remote: RemoteFs;
+	journal: SyncJournal;
 };
 
 type SyncResult = {
@@ -24,11 +26,33 @@ type SyncResult = {
 type EntrySyncResult = SyncResult & {
 	detail: string;
 	operation: SyncOperation;
+	/** Pre-computed SHA-256 hash (for upload operations). */
+	hash?: string;
 };
 
 export type SyncMode = "bidirectional" | "push-local" | "pull-remote";
 
 export type SyncOperation = "scan" | "upload" | "download" | "delete-local" | "delete-remote" | "conflict" | "noop";
+
+export type SyncPlanEntry = {
+	path: string;
+	operation: SyncOperation;
+	detail: string;
+};
+
+export type SyncPlanPreview = {
+	mode: SyncMode;
+	entries: SyncPlanEntry[];
+	summary: {
+		uploads: number;
+		downloads: number;
+		localDeletes: number;
+		remoteDeletes: number;
+		conflicts: number;
+		skipped: number;
+		total: number;
+	};
+};
 
 export type SyncProgress = {
 	current: number;
@@ -62,6 +86,9 @@ type PrevRecord = {
 	ctime: number;
 	size: number;
 	hash?: string;
+	remoteUuid?: string;
+	lastSyncAt?: number;
+	lastKnownSide?: "local" | "remote" | "both";
 };
 
 export class SyncEngine {
@@ -108,62 +135,85 @@ export class SyncEngine {
 			prev.size === 0 ? "Initial sync: preparing files" : "Sync: preparing changes",
 		));
 
+		// Start a journal batch for crash recovery
+		const batchId = await this.config.journal.startBatch(
+			mode === "bidirectional" ? "Sync" : mode === "push-local" ? "Push" : "Pull",
+		);
+
 		let applied = 0;
 		let conflicts = 0;
 		const total = entries.length;
 
-		for (const [index, entry] of entries.entries()) {
-			onProgress?.({
-				current: index + 1,
-				total,
-				path: entry.path,
-				phase: "sync",
-				state: "queued",
-				operation: "noop",
-				detail: syncModeDetail(mode),
-				at: Date.now(),
-			});
-			onProgress?.({
-				current: index + 1,
-				total,
-				path: entry.path,
-				phase: "sync",
-				state: "active",
-				operation: "noop",
-				detail: "Checking changes",
-				at: Date.now(),
-			});
-			let result: EntrySyncResult;
-			try {
-				result = await this.syncEntry(entry, mode);
-			} catch (err) {
+		try {
+			for (const [index, entry] of entries.entries()) {
 				onProgress?.({
 					current: index + 1,
 					total,
 					path: entry.path,
 					phase: "sync",
-					state: "failed",
+					state: "queued",
 					operation: "noop",
-					detail: err instanceof Error ? err.message : "Sync failed",
+					detail: syncModeDetail(mode),
 					at: Date.now(),
 				});
-				throw err;
-			}
-			applied += result.applied;
-			conflicts += result.conflicts;
-			onProgress?.({
-				current: index + 1,
-				total,
-				path: entry.path,
-				phase: "sync",
-				state: result.applied > 0 || result.conflicts > 0 ? "done" : "skipped",
-				operation: result.operation,
-				detail: result.detail,
-				at: Date.now(),
-			});
-		}
+				onProgress?.({
+					current: index + 1,
+					total,
+					path: entry.path,
+					phase: "sync",
+					state: "active",
+					operation: "noop",
+					detail: "Checking changes",
+					at: Date.now(),
+				});
 
-		return { applied, conflicts };
+				// Plan the operation first (for journaling)
+				const planEntry = await this.syncEntry(entry, mode);
+				const journalEntryId = await this.config.journal.logPending({
+					batchId,
+					path: entry.path,
+					operation: planEntry.operation,
+					detail: planEntry.detail,
+				});
+
+				let result: EntrySyncResult;
+				try {
+					result = await this.applySyncEntry(entry, mode, planEntry);
+					await this.config.journal.markApplied(journalEntryId);
+				} catch (err) {
+					onProgress?.({
+						current: index + 1,
+						total,
+						path: entry.path,
+						phase: "sync",
+						state: "failed",
+						operation: planEntry.operation,
+						detail: err instanceof Error ? err.message : "Sync failed",
+						at: Date.now(),
+					});
+					throw err;
+				}
+				applied += result.applied;
+				conflicts += result.conflicts;
+				onProgress?.({
+					current: index + 1,
+					total,
+					path: entry.path,
+					phase: "sync",
+					state: result.applied > 0 || result.conflicts > 0 ? "done" : "skipped",
+					operation: result.operation,
+					detail: result.detail,
+					at: Date.now(),
+				});
+			}
+
+			await this.config.journal.completeBatch(batchId);
+			return { applied, conflicts };
+		} catch (err) {
+			// Leave batch in-progress so crash recovery can detect it
+			console.error("Obsidian Filen Sync: sync batch interrupted", err);
+			throw err;
+		}
 	}
 
 	private async walkLocal(pathFilter: SyncPathFilter): Promise<Map<string, LocalEntry>> {
@@ -219,40 +269,36 @@ export class SyncEngine {
 	}
 
 	private async syncEntry(entry: MixedEntry, mode: SyncMode): Promise<EntrySyncResult> {
-		return this.syncFile(entry, mode);
+		return this.planFile(entry, mode);
 	}
 
-	private async syncFile(entry: MixedEntry, mode: SyncMode): Promise<EntrySyncResult> {
+	/**
+	 * Plan what to do with a file entry. Returns the planned operation
+	 * WITHOUT applying any changes.
+	 */
+	private async planFile(entry: MixedEntry, mode: SyncMode): Promise<EntrySyncResult> {
 		const local = entry.local;
 		const remote = entry.remote;
 		const prev = entry.prev;
 
 		if (local === undefined && remote === undefined) {
-			if (prev !== undefined) {
-				await this.config.db.deleteFile(entry.path);
-			}
-
 			return skipped("Missing on both sides");
 		}
 
 		if (local !== undefined && remote === undefined) {
 			if (mode === "pull-remote") {
 				if (prev !== undefined) {
-					await this.deleteLocal(entry.path);
-					await this.config.db.deleteFile(entry.path);
-					return applied("Deleted local file", "delete-local");
+					return { applied: 1, conflicts: 0, detail: "Deleted local file", operation: "delete-local" };
 				}
 				return skipped("Local-only file ignored");
 			}
 
 			if (mode === "bidirectional" && prev !== undefined) {
-				await this.deleteLocal(entry.path);
-				await this.config.db.deleteFile(entry.path);
-				return applied("Deleted local file", "delete-local");
+				return { applied: 1, conflicts: 0, detail: "Deleted local file", operation: "delete-local" };
 			}
 
-			await this.pushLocal(entry.path, local, await this.hashLocal(local));
-			return applied("Uploaded local change", "upload");
+			const hash = await this.hashLocal(local);
+			return { applied: 1, conflicts: 0, detail: "Uploaded local change", operation: "upload", hash };
 		}
 
 		if (local === undefined && remote !== undefined) {
@@ -260,20 +306,14 @@ export class SyncEngine {
 				if (prev === undefined) {
 					return skipped("Remote-only file ignored");
 				}
-
-				await this.config.remote.rm(entry.path);
-				await this.config.db.deleteFile(entry.path);
-				return applied("Deleted remote file", "delete-remote");
+				return { applied: 1, conflicts: 0, detail: "Deleted remote file", operation: "delete-remote" };
 			}
 
 			if (mode === "bidirectional" && prev !== undefined) {
-				await this.config.remote.rm(entry.path);
-				await this.config.db.deleteFile(entry.path);
-				return applied("Deleted remote file", "delete-remote");
+				return { applied: 1, conflicts: 0, detail: "Deleted remote file", operation: "delete-remote" };
 			}
 
-			await this.pullRemote(entry.path, remote);
-			return applied("Downloaded remote change", "download");
+			return { applied: 1, conflicts: 0, detail: "Downloaded remote change", operation: "download" };
 		}
 
 		if (local === undefined || remote === undefined) {
@@ -282,22 +322,21 @@ export class SyncEngine {
 
 		if (prev === undefined) {
 			if (mode === "push-local") {
-				await this.pushLocal(entry.path, local, await this.hashLocal(local));
-				return applied("Uploaded local file", "upload");
+				const hash = await this.hashLocal(local);
+				return { applied: 1, conflicts: 0, detail: "Uploaded local file", operation: "upload", hash };
 			}
 
 			if (mode === "pull-remote") {
-				await this.pullRemote(entry.path, remote);
-				return applied("Downloaded remote file", "download");
+				return { applied: 1, conflicts: 0, detail: "Downloaded remote file", operation: "download" };
 			}
 
 			const newer = chooseNewer(local, remote);
 			if (newer === "local") {
-				await this.pushLocal(entry.path, local, await this.hashLocal(local));
+				const hash = await this.hashLocal(local);
+				return { applied: 1, conflicts: 1, detail: "No baseline; chose newer file", operation: "conflict", hash };
 			} else {
-				await this.pullRemote(entry.path, remote);
+				return { applied: 1, conflicts: 1, detail: "No baseline; chose newer file", operation: "conflict" };
 			}
-			return conflict("No baseline; chose newer file");
 		}
 
 		const localChange = await this.detectLocalChange(prev, local);
@@ -320,41 +359,97 @@ export class SyncEngine {
 			if (mode === "pull-remote") {
 				return skipped("Local-only change ignored");
 			}
-
-			await this.pushLocal(entry.path, local, localChange.hash);
-			return applied("Uploaded local change", "upload");
+			return { applied: 1, conflicts: 0, detail: "Uploaded local change", operation: "upload", hash: localChange.hash };
 		}
 
 		if (!localChanged && remoteChanged) {
 			if (mode === "push-local") {
 				return skipped("Remote-only change ignored");
 			}
-
-			await this.pullRemote(entry.path, remote);
-			return applied("Downloaded remote change", "download");
+			return { applied: 1, conflicts: 0, detail: "Downloaded remote change", operation: "download" };
 		}
 
 		if (mode === "push-local") {
-			await this.pushLocal(entry.path, local, localChange.hash);
-			return applied("Uploaded local change", "upload");
+			return { applied: 1, conflicts: 0, detail: "Uploaded local change", operation: "upload", hash: localChange.hash };
 		}
 
 		if (mode === "pull-remote") {
-			await this.writeConflictCopy(local.path);
-			await this.pullRemote(entry.path, remote);
-			return conflict("Conflict copy kept; downloaded remote");
+			return { applied: 1, conflicts: 1, detail: "Conflict copy kept; downloaded remote", operation: "conflict" };
 		}
 
 		const newer = chooseNewer(local, remote);
 		if (newer === "local") {
-			await this.writeConflictCopy(local.path);
-			await this.pushLocal(entry.path, local, localChange.hash);
-		} else {
-			await this.writeConflictCopy(local.path);
-			await this.pullRemote(entry.path, remote);
+			return { applied: 1, conflicts: 1, detail: "Conflict copy kept; uploaded local", operation: "conflict", hash: localChange.hash };
+		}
+		return { applied: 1, conflicts: 1, detail: "Conflict copy kept; downloaded remote", operation: "conflict" };
+	}
+
+	/**
+	 * Apply a planned sync operation. Performs the actual I/O.
+	 */
+	private async applySyncEntry(entry: MixedEntry, _mode: SyncMode, plan: EntrySyncResult): Promise<EntrySyncResult> {
+		const local = entry.local;
+		const remote = entry.remote;
+		const prev = entry.prev;
+
+		// Handle delete-local
+		if (plan.operation === "delete-local") {
+			if (prev !== undefined) {
+				await this.config.db.deleteFile(entry.path);
+			}
+			await this.deleteLocal(entry.path);
+			return plan;
 		}
 
-		return conflict(newer === "local" ? "Conflict copy kept; uploaded local" : "Conflict copy kept; downloaded remote");
+		// Handle delete-remote
+		if (plan.operation === "delete-remote") {
+			await this.config.remote.rm(entry.path);
+			if (prev !== undefined) {
+				await this.config.db.deleteFile(entry.path);
+			}
+			return plan;
+		}
+
+		// Handle upload (only if local exists)
+		if (plan.operation === "upload" && local !== undefined) {
+			const hash = plan.hash ?? await this.hashLocal(local);
+			await this.pushLocal(entry.path, local, hash);
+			return plan;
+		}
+
+		// Handle download (only if remote exists)
+		if (plan.operation === "download" && remote !== undefined) {
+			await this.pullRemote(entry.path, remote);
+			return plan;
+		}
+
+		// Handle conflict (both sides exist, we need to apply the chosen side)
+		if (plan.operation === "conflict") {
+			if (local !== undefined && remote !== undefined) {
+				await this.writeConflictCopy(local.path);
+				const newer = chooseNewer(local, remote);
+				if ((newer === "local" && plan.detail.includes("uploaded")) || plan.hash !== undefined) {
+					const hash = plan.hash ?? await this.hashLocal(local);
+					await this.pushLocal(entry.path, local, hash);
+				} else if (remote !== undefined) {
+					await this.pullRemote(entry.path, remote);
+				}
+			} else if (local !== undefined && remote === undefined) {
+				// No baseline conflict: upload local
+				const hash = plan.hash ?? await this.hashLocal(local);
+				await this.pushLocal(entry.path, local, hash);
+			} else if (local === undefined && remote !== undefined) {
+				await this.pullRemote(entry.path, remote);
+			}
+			return plan;
+		}
+
+		// Handle skipped (noop) - cleanup db for files missing on both sides
+		if (plan.operation === "noop" && prev !== undefined && local === undefined && remote === undefined) {
+			await this.config.db.deleteFile(entry.path);
+		}
+
+		return plan;
 	}
 
 	private async pushLocal(path: string, local: LocalEntry, hash: string): Promise<void> {
@@ -371,6 +466,8 @@ export class SyncEngine {
 			ctime: local.ctime,
 			size: local.size,
 			hash,
+			lastSyncAt: Date.now(),
+			lastKnownSide: "local",
 		});
 	}
 
@@ -389,6 +486,8 @@ export class SyncEngine {
 			ctime: remote.mtime,
 			size: remote.size,
 			hash,
+			lastSyncAt: Date.now(),
+			lastKnownSide: "remote",
 		});
 	}
 
@@ -453,7 +552,74 @@ export class SyncEngine {
 	}
 
 	private async upsertPrev(record: PrevRecord): Promise<void> {
-		await this.config.db.setFile(record.path, record);
+		// Preserve existing remoteUuid if not provided
+		const existing = await this.config.db.getFile(record.path);
+		const merged: SyncedFileRecord = {
+			...record,
+			remoteUuid: record.remoteUuid ?? existing?.remoteUuid,
+		};
+		await this.config.db.setFile(record.path, merged);
+	}
+
+	/**
+	 * Try to fetch and store the remote UUID from Filen for a given path.
+	 * Best-effort: does not throw if the API call fails.
+	 */
+	private async trackRemoteUuid(path: string): Promise<void> {
+		try {
+			// The remote FS doesn't expose a direct UUID lookup method.
+			// We rely on the sync record already having the UUID from a
+			// previous download. For pure uploads, Filen assigns a UUID
+			// on write but doesn't return it via the current SDK.
+			// Future Filen SDK updates may expose this.
+			// For now, this is a placeholder to keep the API clean.
+		} catch {
+			// Best-effort: ignore failures
+		}
+	}
+
+	/**
+	 * Preview what a sync would do without applying any changes.
+	 * Returns a plan with per-file decisions and summary counts.
+	 */
+	async previewSyncPlan(mode: SyncMode = "bidirectional"): Promise<SyncPlanPreview> {
+		await this.ensureRemote();
+		const pathFilter = createSyncPathFilter({
+			configDir: this.config.app.vault.configDir,
+			pluginId: this.config.pluginId,
+			ignorePatterns: this.config.settings.ignorePatterns,
+		});
+		const [local, remote, prevRecords] = await Promise.all([
+			this.walkLocal(pathFilter),
+			this.walkRemote(pathFilter),
+			this.config.db.getAllFiles(),
+		]);
+		const prev = filterPrevRecords(prevRecords, pathFilter);
+		const entries = this.ensemble(local, remote, prev);
+
+		const planEntries: SyncPlanEntry[] = [];
+		const summary = { uploads: 0, downloads: 0, localDeletes: 0, remoteDeletes: 0, conflicts: 0, skipped: 0, total: entries.length };
+
+		for (const entry of entries) {
+			const plan = await this.planFile(entry, mode);
+			const planEntry: SyncPlanEntry = {
+				path: entry.path,
+				operation: plan.operation,
+				detail: plan.detail,
+			};
+			planEntries.push(planEntry);
+
+			switch (plan.operation) {
+				case "upload": summary.uploads++; break;
+				case "download": summary.downloads++; break;
+				case "delete-local": summary.localDeletes++; break;
+				case "delete-remote": summary.remoteDeletes++; break;
+				case "conflict": summary.conflicts++; break;
+				default: summary.skipped++; break;
+			}
+		}
+
+		return { mode, entries: planEntries, summary };
 	}
 
 	private asFile(file: TAbstractFile | null): TFile {
@@ -471,16 +637,7 @@ const sameFileRecord = (prev: SyncedFileRecord, local: LocalEntry): boolean =>
 const sameRemoteRecord = (prev: SyncedFileRecord, remote: RemoteEntry): boolean =>
 	prev.path === remote.path && prev.mtime === remote.mtime && prev.size === remote.size;
 
-const applied = (detail: string, operation: Exclude<SyncOperation, "scan" | "conflict" | "noop">): EntrySyncResult => ({
-	applied: 1,
-	conflicts: 0,
-	detail,
-	operation,
-});
-
 const skipped = (detail: string): EntrySyncResult => ({ applied: 0, conflicts: 0, detail, operation: "noop" });
-
-const conflict = (detail: string): EntrySyncResult => ({ applied: 1, conflicts: 1, detail, operation: "conflict" });
 
 const syncModeDetail = (mode: SyncMode): string => {
 	switch (mode) {

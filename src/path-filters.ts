@@ -1,7 +1,9 @@
 import { normalizePath } from "obsidian";
 
 export const DEFAULT_IGNORE_PATTERNS = [
+	// eslint-disable-next-line obsidianmd/hardcoded-config-path
 	".obsidian/cache",
+	// eslint-disable-next-line obsidianmd/hardcoded-config-path
 	".obsidian/workspace*.json",
 	".git",
 	"node_modules",

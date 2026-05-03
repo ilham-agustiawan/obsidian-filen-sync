@@ -1,4 +1,5 @@
 import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, setIcon } from "obsidian";
+import { handleCrashRecoveryOnStartup, detectIncompleteSyncs, rollbackIncompleteSync, discardIncompleteSync } from "./crash-recovery";
 import { SyncDb } from "./db";
 import {
 	generateReport,
@@ -19,7 +20,8 @@ import {
 	type SyncViewState,
 } from "./progress-view";
 import { FilenSyncSettings, FilenSyncSettingTab } from "./settings";
-import { SyncEngine, type SyncProgress } from "./sync-engine";
+import { SyncEngine, type SyncOperation, type SyncPlanPreview, type SyncProgress } from "./sync-engine";
+import { SyncJournal, type SyncJournal as ISyncJournal } from "./sync-journal";
 
 /**
  * Retry a function with exponential backoff for transient errors.
@@ -87,7 +89,7 @@ type StatusBarState = {
 
 export default class FilenSyncPlugin extends Plugin {
 	settings: FilenSyncSettings;
-	private db: SyncDb = SyncDb.open("__init__"); // replaced in onload
+	private db!: SyncDb;
 	private sessionPassword = "";
 	private sessionTwoFactorCode = "";
 	private statusBarItemEl: HTMLElement | null = null;
@@ -99,6 +101,7 @@ export default class FilenSyncPlugin extends Plugin {
 		detail: "Open settings to connect your Filen account.",
 		updatedAt: null,
 	};
+	private journal!: ISyncJournal;
 	private syncEngine: SyncEngine | null = null;
 	private isSyncing = false;
 	private debounceTimer: number | null = null;
@@ -122,7 +125,9 @@ export default class FilenSyncPlugin extends Plugin {
 	};
 
 	async onload() {
-		this.db = SyncDb.open(this.app.vault.getName());
+		this.db = await SyncDb.open(this.app.vault.getName());
+		await this.db.runMigrations();
+		this.journal = SyncJournal.open(this.app.vault.getName());
 		await this.loadSettings();
 		this.registerView(
 			FILEN_SYNC_PROGRESS_VIEW_TYPE,
@@ -158,7 +163,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "test-filen-connection",
-			name: "Test Filen connection",
+			name: "Test filen connection",
 			callback: () => {
 				void this.testConnection();
 			},
@@ -177,6 +182,22 @@ export default class FilenSyncPlugin extends Plugin {
 			name: "Toggle sync on save",
 			callback: () => {
 				void this.toggleSyncOnSave();
+			},
+		});
+
+		this.addCommand({
+			id: "preview-sync-plan",
+			name: "Preview sync plan",
+			callback: () => {
+				void this.previewSyncPlan();
+			},
+		});
+
+		this.addCommand({
+			id: "repair-sync-state",
+			name: "Repair sync state",
+			callback: () => {
+				void this.repairSyncState();
 			},
 		});
 
@@ -200,6 +221,7 @@ export default class FilenSyncPlugin extends Plugin {
 		this.app.workspace.onLayoutReady(() => {
 			this.maybePromptForSetup();
 			void this.runStartupDiagnostics();
+			void handleCrashRecoveryOnStartup(this.app, this.journal);
 		});
 	}
 
@@ -307,6 +329,73 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	/**
+	 * Repair sync state by rolling back incomplete sync batches
+	 * and pruning old journal entries.
+	 */
+	public async repairSyncState(): Promise<void> {
+		try {
+			const check = await detectIncompleteSyncs(this.journal);
+			if (!check.hasIncompleteBatches) {
+				new Notice("Sync state is clean. No incomplete operations found.");
+				return;
+			}
+
+			const count = check.batches.length;
+			const confirmed = await new Promise<boolean>((resolve) => {
+				const modal = new Modal(this.app);
+				modal.modalEl.addClass("filen-sync-repair-modal");
+				modal.onOpen = () => {
+					modal.contentEl.empty();
+					modal.contentEl.createEl("h2", { text: "Repair sync state" });
+					modal.contentEl.createEl("p", {
+						text: `Found ${count} incomplete sync batch(es) with ${check.entryCount} pending operations. These were left from a previous interrupted sync.`,
+					});
+					modal.contentEl.createEl("p", {
+						text: "Rolling back will mark all incomplete operations as cancelled. No files will be modified.",
+						cls: "filen-sync-repair-note",
+					});
+
+					const actions = modal.contentEl.createDiv({ cls: "modal-button-container" });
+					const cancelBtn = actions.createEl("button", { text: "Cancel" });
+					cancelBtn.addEventListener("click", () => { modal.close(); resolve(false); });
+
+					const rollbackBtn = actions.createEl("button", { text: "Roll back incomplete syncs" });
+					rollbackBtn.addClass("mod-cta");
+					rollbackBtn.addEventListener("click", () => { modal.close(); resolve(true); });
+				};
+				modal.open();
+			});
+
+			if (!confirmed) return;
+
+			for (const batch of check.batches) {
+				await rollbackIncompleteSync(this.journal, batch.id);
+				await discardIncompleteSync(this.journal, batch.id);
+			}
+
+			new Notice(`Sync state repaired: ${count} incomplete batch(es) rolled back.`);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Repair failed: ${message}`);
+		}
+	}
+
+	/**
+	 * Preview what a sync would do and show in a modal.
+	 */
+	public async previewSyncPlan(): Promise<void> {
+		try {
+			const engine = this.getSyncEngine();
+			const plan = await engine.previewSyncPlan("bidirectional");
+
+			new SyncPlanPreviewModal(this.app, plan).open();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			new Notice(`Preview failed: ${message}`);
+		}
+	}
+
+	/**
 	 * Copy a sanitized diagnostics report to the clipboard.
 	 * No vault contents, file paths, or auth secrets are included.
 	 */
@@ -351,11 +440,12 @@ export default class FilenSyncPlugin extends Plugin {
 			if (failures.length === 0) return;
 
 			// Log all results for debugging
-			console.log("Obsidian Filen Sync startup diagnostics:", checks);
+			console.warn("Obsidian Filen Sync startup diagnostics:", checks);
 
 			if (hasCriticalFailure(checks)) {
 				new Notice(
-					`Obsidian Filen Sync: critical issue detected. Open settings → Copy diagnostics report for details.`,
+					// eslint-disable-next-line obsidianmd/ui/sentence-case
+					`Obsidian Filen Sync: critical issue detected. Open settings → copy diagnostics report for details.`,
 					10000,
 				);
 			} else if (failures.length > 0) {
@@ -607,6 +697,7 @@ export default class FilenSyncPlugin extends Plugin {
 				pluginId: this.manifest.id,
 				settings: this.settings,
 				remote: store,
+				journal: this.journal,
 			});
 		}
 
@@ -977,3 +1068,124 @@ const describeSyncCompletion = (label: string, result: string): string => {
 };
 
 const capitalize = (value: string): string => value.length === 0 ? value : value.charAt(0).toUpperCase() + value.slice(1);
+
+class SyncPlanPreviewModal extends Modal {
+	constructor(app: App, private readonly plan: SyncPlanPreview) {
+		super(app);
+		this.modalEl.addClass("filen-sync-plan-modal");
+	}
+
+	onOpen(): void {
+		const { contentEl } = this;
+		contentEl.empty();
+
+		contentEl.createEl("h2", { text: "Sync plan preview" });
+		contentEl.createEl("p", {
+			text: `This is a dry-run preview. No changes will be applied. Mode: ${this.plan.mode}`,
+			cls: "filen-sync-plan-description",
+		});
+
+		// Summary card
+		const summary = contentEl.createDiv({ cls: "filen-sync-plan-summary" });
+		const counts = this.plan.summary;
+		const summaryItems: Array<{ label: string; count: number; cls: string }> = [
+			{ label: "Uploads", count: counts.uploads, cls: "upload" },
+			{ label: "Downloads", count: counts.downloads, cls: "download" },
+			{ label: "Local deletes", count: counts.localDeletes, cls: "delete" },
+			{ label: "Remote deletes", count: counts.remoteDeletes, cls: "delete" },
+			{ label: "Conflicts", count: counts.conflicts, cls: "conflict" },
+			{ label: "Skipped", count: counts.skipped, cls: "skipped" },
+		];
+
+		for (const item of summaryItems) {
+			if (item.count > 0 || item.cls === "skipped") {
+				const pill = summary.createDiv({ cls: `filen-sync-plan-pill ${item.cls}` });
+				pill.createSpan({ text: String(item.count), cls: "filen-sync-plan-pill-count" });
+				pill.createSpan({ text: item.label, cls: "filen-sync-plan-pill-label" });
+			}
+		}
+
+		// Total
+		const total = summary.createDiv({ cls: "filen-sync-plan-pill total" });
+		total.createSpan({ text: String(counts.total), cls: "filen-sync-plan-pill-count" });
+		total.createSpan({ text: "Total files", cls: "filen-sync-plan-pill-label" });
+
+		// Warn about bulk deletes
+		const bulkDeletes = counts.localDeletes + counts.remoteDeletes;
+		if (bulkDeletes > 10) {
+			const warning = contentEl.createDiv({ cls: "filen-sync-plan-warning" });
+			warning.createSpan({ text: `⚠ ${bulkDeletes} files would be deleted. Review carefully before running sync.` });
+		}
+
+		// File list (limited to first 100)
+		const entries = this.plan.entries.filter((e) => e.operation !== "noop");
+		if (entries.length > 0) {
+			const listHeader = contentEl.createDiv({ cls: "filen-sync-plan-list-header" });
+			listHeader.createSpan({ text: `Changed files (${Math.min(entries.length, 100)} of ${entries.length})` });
+
+			const list = contentEl.createDiv({ cls: "filen-sync-plan-list" });
+			for (const entry of entries.slice(0, 100)) {
+				const row = list.createDiv({ cls: "filen-sync-plan-row" });
+				const icon = row.createSpan({ cls: `filen-sync-plan-icon ${entry.operation}` });
+				setIcon(icon, iconForPlanOperation(entry.operation));
+				row.createSpan({ text: entry.path, cls: "filen-sync-plan-path" });
+				row.createSpan({ text: entry.detail, cls: "filen-sync-plan-detail" });
+			}
+
+			if (entries.length > 100) {
+				contentEl.createDiv({
+					text: `... and ${entries.length - 100} more files.`,
+					cls: "filen-sync-plan-more",
+				});
+			}
+		} else {
+			contentEl.createDiv({
+				text: "No changes detected. Your vault is in sync.",
+				cls: "filen-sync-plan-empty",
+			});
+		}
+
+		// Action buttons
+		const actions = contentEl.createDiv({ cls: "modal-button-container" });
+		const closeBtn = actions.createEl("button", { text: "Close" });
+		closeBtn.addEventListener("click", () => this.close());
+
+		const syncBtn = actions.createEl("button", { text: "Run sync now" });
+		syncBtn.addClass("mod-cta");
+		syncBtn.addEventListener("click", () => {
+			this.close();
+			// Access the plugin through the app to trigger sync
+			const plugin = getFilenSyncPlugin(this.app);
+			if (plugin) {
+				void plugin.syncNow();
+			}
+		});
+	}
+}
+
+/**
+ * Look up the FilenSyncPlugin instance from the Obsidian app.
+ */
+function getFilenSyncPlugin(app: App): FilenSyncPlugin | null {
+	const plugins = (app as unknown as Record<string, unknown>).plugins as Record<string, unknown> | undefined;
+	if (plugins?.plugins) {
+		const pluginMap = plugins.plugins as Record<string, unknown>;
+		for (const plugin of Object.values(pluginMap)) {
+			if (plugin instanceof FilenSyncPlugin) {
+				return plugin;
+			}
+		}
+	}
+	return null;
+}
+
+const iconForPlanOperation = (operation: SyncOperation): string => {
+	switch (operation) {
+		case "upload": return "arrow-up";
+		case "download": return "arrow-down";
+		case "delete-local":
+		case "delete-remote": return "trash-2";
+		case "conflict": return "alert-triangle";
+		default: return "check";
+	}
+};
