@@ -1,4 +1,5 @@
 import { FilenSDK } from "@filen/sdk";
+import { createObsidianAxiosLike } from "./obsidian-axios-adapter";
 import type { FilenAuth } from "./settings";
 
 export type RemoteEntry = {
@@ -8,25 +9,12 @@ export type RemoteEntry = {
 	isDir: boolean;
 };
 
-export type RemoteFileVersion = {
-	uuid: string;
-	version: number;
-	timestamp: number;
-	bucket: string;
-	region: string;
-	chunks: number;
-};
-
 export type RemoteFs = {
 	walk(): Promise<RemoteEntry[]>;
 	readFile(path: string): Promise<Uint8Array>;
 	writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void>;
 	rm(path: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
-	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
-	readFileVersion(version: RemoteFileVersion): Promise<Uint8Array>;
-	restoreFileVersion(path: string, versionUuid: string): Promise<void>;
-	deleteFileVersion(versionUuid: string): Promise<void>;
 	checkConnect(): Promise<void>;
 	close(): void;
 };
@@ -167,75 +155,6 @@ export class FilenRemoteFs implements RemoteFs {
 		await fs.mkdir({ path: this.join(path) });
 	}
 
-	async getFileVersions(path: string): Promise<RemoteFileVersion[]> {
-		const client = await this.getClient();
-		const fs = client.fs();
-		const uuid = await fs.pathToItemUUID({ path: this.join(path), type: "file" });
-		if (uuid === null) {
-			return [];
-		}
-
-		const response = await client.cloud().fileVersions({ uuid });
-		return response.versions
-			.filter((version) => version.uuid !== uuid)
-			.map((version) => ({
-				uuid: version.uuid,
-				version: version.version,
-				timestamp: normalizeRemoteTimestampMs(version.timestamp),
-				bucket: version.bucket,
-				region: version.region,
-				chunks: version.chunks,
-			}));
-	}
-
-	async readFileVersion(version: RemoteFileVersion): Promise<Uint8Array> {
-		const client = await this.getClient();
-		const file = await client.cloud().getFile({ uuid: version.uuid });
-		const stream = client.cloud().downloadFileToReadableStream({
-			uuid: version.uuid,
-			bucket: version.bucket,
-			region: version.region,
-			version: file.version,
-			key: file.metadataDecrypted.key,
-			size: file.size,
-			chunks: version.chunks,
-		});
-		const reader = stream.getReader();
-		const chunks: Uint8Array[] = [];
-		let byteLength = 0;
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			if (value instanceof Uint8Array && value.byteLength > 0) {
-				chunks.push(value);
-				byteLength += value.byteLength;
-			}
-		}
-		const content = new Uint8Array(byteLength);
-		let offset = 0;
-		for (const chunk of chunks) {
-			content.set(chunk, offset);
-			offset += chunk.byteLength;
-		}
-		return content;
-	}
-
-	async restoreFileVersion(path: string, versionUuid: string): Promise<void> {
-		const client = await this.getClient();
-		const fs = client.fs();
-		const currentUuid = await fs.pathToItemUUID({ path: this.join(path), type: "file" });
-		if (currentUuid === null) {
-			throw new Error("Remote file missing. Sync the file first, then try restore again.");
-		}
-
-		await client.cloud().restoreFileVersion({ uuid: versionUuid, currentUUID: currentUuid });
-	}
-
-	async deleteFileVersion(versionUuid: string): Promise<void> {
-		const client = await this.getClient();
-		await client.cloud().deleteFile({ uuid: versionUuid });
-	}
-
 	async checkConnect(): Promise<void> {
 		await this.ensureRoot();
 		const testPath = `_connection_test_${Date.now()}.txt`;
@@ -272,11 +191,18 @@ export class FilenRemoteFs implements RemoteFs {
 			return this.client;
 		}
 
-		const client = new FilenSDK({
-			metadataCache: true,
-			connectToSocket: false,
-			...(this.config.auth ?? {}),
-		});
+		const client = new FilenSDK(
+			{
+				metadataCache: true,
+				connectToSocket: false,
+				...(this.config.auth ?? {}),
+			},
+			undefined,
+			// Route all SDK HTTP requests through Obsidian's requestUrl (Electron
+			// main-process net module) to avoid ERR_CERT_AUTHORITY_INVALID that
+			// XHR/fetch in the renderer raises for gateway.filen.net.
+			createObsidianAxiosLike() as unknown as ConstructorParameters<typeof FilenSDK>[2],
+		);
 
 		if (this.config.auth === null) {
 			try {
@@ -298,7 +224,7 @@ export class FilenRemoteFs implements RemoteFs {
 	private get root(): string {
 		const value = this.config.remoteRoot.trim();
 		if (value.length === 0) {
-			return "/Apps/obsidian-filen-sync/default";
+			return "/Obsidian";
 		}
 
 		return value.startsWith("/") ? value : `/${value}`;
