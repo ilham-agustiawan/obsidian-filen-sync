@@ -203,10 +203,6 @@ export class FileVersionModal extends Modal {
 		restoreBtn.disabled = state.restoring || state.selected === null;
 		restoreBtn.addEventListener("click", () => { void this.restore(state); });
 
-		const closeBtn = header.createEl("button", { cls: "filen-sync-version-close", text: "×" });
-		closeBtn.setAttr("aria-label", "Close");
-		closeBtn.addEventListener("click", () => { this.close(); });
-
 		this.previewEl = container.createDiv({ cls: "filen-sync-version-content" });
 		this.renderPreviewContent(state);
 	}

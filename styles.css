@@ -716,19 +716,6 @@
 	cursor: pointer;
 }
 
-.filen-sync-version-close {
-	font-size: 1.2em;
-	line-height: 1;
-	padding: 2px 6px;
-	background: none;
-	border: none;
-	cursor: pointer;
-	color: var(--text-muted);
-}
-
-.filen-sync-version-close:hover {
-	color: var(--text-normal);
-}
 
 .filen-sync-version-content {
 	flex: 1;
