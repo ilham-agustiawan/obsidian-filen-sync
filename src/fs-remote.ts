@@ -9,6 +9,15 @@ export type RemoteEntry = {
 	isDir: boolean;
 };
 
+export type RemoteFileVersion = {
+	uuid: string;
+	version: number;
+	timestamp: number; // normalized to ms
+	bucket: string;
+	region: string;
+	chunks: number;
+};
+
 export type RemoteFs = {
 	walk(): Promise<RemoteEntry[]>;
 	readFile(path: string): Promise<Uint8Array>;
@@ -16,6 +25,9 @@ export type RemoteFs = {
 	rm(path: string): Promise<void>;
 	mkdir(path: string): Promise<void>;
 	checkConnect(): Promise<void>;
+	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
+	readFileVersion(version: RemoteFileVersion): Promise<Uint8Array>;
+	restoreFileVersion(path: string, versionUuid: string): Promise<void>;
 	close(): void;
 };
 
@@ -175,6 +187,56 @@ export class FilenRemoteFs implements RemoteFs {
 				}
 			}
 		}
+	}
+
+	async getFileVersions(path: string): Promise<RemoteFileVersion[]> {
+		const client = await this.getClient();
+		const uuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
+		if (uuid === null) return [];
+		const response = await client.cloud().fileVersions({ uuid });
+		return response.versions.map((v) => ({
+			uuid: v.uuid,
+			version: v.version,
+			timestamp: normalizeRemoteTimestampMs(v.timestamp),
+			bucket: v.bucket,
+			region: v.region,
+			chunks: v.chunks,
+		}));
+	}
+
+	async readFileVersion(version: RemoteFileVersion): Promise<Uint8Array> {
+		const client = await this.getClient();
+		const file = await client.cloud().getFile({ uuid: version.uuid });
+		const stream = client.cloud().downloadFileToReadableStream({
+			uuid: version.uuid,
+			bucket: version.bucket,
+			region: version.region,
+			version: file.version,
+			key: file.metadataDecrypted.key,
+			size: file.size,
+			chunks: version.chunks,
+		});
+		const reader = stream.getReader();
+		const buffers: Buffer[] = [];
+		let total = 0;
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (value !== undefined) { buffers.push(value); total += value.byteLength; }
+		}
+		const out = new Uint8Array(total);
+		let offset = 0;
+		for (const buf of buffers) { out.set(buf, offset); offset += buf.byteLength; }
+		return out;
+	}
+
+	async restoreFileVersion(path: string, versionUuid: string): Promise<void> {
+		const client = await this.getClient();
+		const currentUuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
+		if (currentUuid === null) {
+			throw new Error("Remote file missing. Sync the file first, then try restore again.");
+		}
+		await client.cloud().restoreFileVersion({ uuid: versionUuid, currentUUID: currentUuid });
 	}
 
 	close(): void {

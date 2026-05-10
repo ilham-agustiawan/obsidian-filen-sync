@@ -1,6 +1,7 @@
 import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, setIcon } from "obsidian";
 import { ActivityLogModal, inferActivityLogKind, trimActivityLogs, type ActivityLogEntry, type ActivityLogKind } from "./activity-logs";
 import { SyncDb } from "./db";
+import { FileVersionModal } from "./file-version-modal";
 import { FilenRemoteFs } from "./fs-remote";
 import { FilenSyncSetupModal } from "./onboarding-modal";
 import { createSyncPathFilter } from "./path-filters";
@@ -76,6 +77,7 @@ export default class FilenSyncPlugin extends Plugin {
 		detail: "Open settings to connect your Filen account.",
 		updatedAt: null,
 	};
+	private remoteFs: FilenRemoteFs | null = null;
 	private syncEngine: SyncEngine | null = null;
 	private isSyncing = false;
 	private debounceTimer: number | null = null;
@@ -171,12 +173,14 @@ export default class FilenSyncPlugin extends Plugin {
 		this.sessionPassword = value;
 		this.syncEngine?.close();
 		this.syncEngine = null;
+		this.remoteFs = null;
 	}
 
 	setSessionTwoFactorCode(value: string) {
 		this.sessionTwoFactorCode = value;
 		this.syncEngine?.close();
 		this.syncEngine = null;
+		this.remoteFs = null;
 	}
 
 	hasSessionPassword(): boolean {
@@ -190,6 +194,7 @@ export default class FilenSyncPlugin extends Plugin {
 	async clearSavedAuth() {
 		this.syncEngine?.close();
 		this.syncEngine = null;
+		this.remoteFs = null;
 		this.sessionPassword = "";
 		this.sessionTwoFactorCode = "";
 		this.settings.auth = null;
@@ -239,6 +244,7 @@ export default class FilenSyncPlugin extends Plugin {
 	refreshSyncTarget(): void {
 		this.syncEngine?.close();
 		this.syncEngine = null;
+		this.remoteFs = null;
 	}
 
 	async syncNow() {
@@ -598,7 +604,7 @@ export default class FilenSyncPlugin extends Plugin {
 		return confirmAction(this.app, "Delete local files?", message, "Delete local files");
 	}
 
-	private getSyncEngine(): SyncEngine {
+	private getOrCreateRemoteFs(): FilenRemoteFs {
 		if (this.settings.email.length === 0) {
 			throw new Error("Filen email missing. Add it in plugin settings.");
 		}
@@ -606,8 +612,8 @@ export default class FilenSyncPlugin extends Plugin {
 			throw new Error("Filen password missing. Enter it once in plugin settings.");
 		}
 
-		if (this.syncEngine === null) {
-			const store = new FilenRemoteFs({
+		if (this.remoteFs === null) {
+			this.remoteFs = new FilenRemoteFs({
 				email: this.settings.email,
 				password: this.sessionPassword,
 				twoFactorCode: this.sessionTwoFactorCode,
@@ -621,13 +627,21 @@ export default class FilenSyncPlugin extends Plugin {
 					else this.renderStatusBar();
 				},
 			});
+		}
 
+		return this.remoteFs;
+	}
+
+	private getSyncEngine(): SyncEngine {
+		const remote = this.getOrCreateRemoteFs();
+
+		if (this.syncEngine === null) {
 			this.syncEngine = new SyncEngine({
 				app: this.app,
 				db: this.db,
 				pluginId: this.manifest.id,
 				settings: this.settings,
-				remote: store,
+				remote,
 			});
 		}
 
@@ -642,6 +656,26 @@ export default class FilenSyncPlugin extends Plugin {
 			item.setIcon("refresh-cw");
 			item.onClick(() => { void this.syncNow(); });
 		});
+		menu.addItem((item) => {
+			item.setTitle("Filen: version history");
+			item.setIcon("history");
+			item.onClick(() => { this.openVersionHistory(file); });
+		});
+	}
+
+	private openVersionHistory(file: TFile): void {
+		try {
+			const remote = this.getOrCreateRemoteFs();
+			new FileVersionModal({
+				app: this.app,
+				remote,
+				filePath: file.path,
+				fileName: file.name,
+				onRestored: () => { this.scheduleAutoSync(0); },
+			}).open();
+		} catch (error) {
+			new Notice(error instanceof Error ? error.message : "Failed to open version history.");
+		}
 	}
 
 	private initializeStatusBar(): void {
