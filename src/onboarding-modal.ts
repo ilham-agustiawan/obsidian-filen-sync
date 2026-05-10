@@ -18,7 +18,7 @@ export class FilenSyncSetupModal extends Modal {
 		this.contentEl.createEl("h2", { text: "Set up Obsidian Filen Sync" });
 		this.contentEl.createEl("p", {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			text: "Connect your Filen account, choose the remote folder for this vault, then run your first sync.",
+			text: "Mirror this vault to a dedicated Filen folder. Start with a manual sync, then enable auto-sync when you are ready.",
 			cls: "filen-sync-setup-copy",
 		});
 
@@ -27,7 +27,8 @@ export class FilenSyncSetupModal extends Modal {
 		// eslint-disable-next-line obsidianmd/ui/sentence-case
 		steps.createEl("li", { text: "Enter your Filen email, password, and optional 2FA code" });
 		steps.createEl("li", { text: "Keep the default remote folder or choose one dedicated to this vault" });
-		steps.createEl("li", { text: "Run sync now to authenticate and create the mirror" });
+		steps.createEl("li", { text: "Click Login to authenticate" });
+		steps.createEl("li", { text: "Run sync now to create the mirror" });
 
 		const note = this.contentEl.createDiv({ cls: "filen-sync-setup-note" });
 		note.createEl("strong", { text: "Privacy" });

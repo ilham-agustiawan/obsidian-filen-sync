@@ -1,4 +1,5 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
+import { readActivityLogs, type ActivityLogEntry } from "./activity-logs";
 import type FilenSyncPlugin from "./main";
 import { DEFAULT_IGNORE_PATTERNS, normalizeIgnorePatterns } from "./path-filters";
 
@@ -45,9 +46,11 @@ export type FilenSyncSettings = {
 	syncOnSaveDelaySeconds: number;
 	syncIntervalMinutes: number;
 	syncStartupDelaySeconds: number;
+	syncPaused: boolean;
+	activityLogs: ActivityLogEntry[];
 };
 
-const DEFAULT_REMOTE_ROOT = "/Apps/obsidian-filen-sync/default";
+const DEFAULT_REMOTE_ROOT = "/Obsidian";
 
 export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	email: "",
@@ -56,10 +59,12 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	vaultName: "default",
 	ignorePatterns: [...DEFAULT_IGNORE_PATTERNS],
 	auth: null,
-	syncOnSave: false,
+	syncOnSave: true,
 	syncOnSaveDelaySeconds: 5,
-	syncIntervalMinutes: 0,
+	syncIntervalMinutes: 3,
 	syncStartupDelaySeconds: 0,
+	syncPaused: false,
+	activityLogs: [],
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -133,6 +138,7 @@ export const FilenSyncSettings = {
 			return {
 				...DEFAULT_SETTINGS,
 				ignorePatterns: [...DEFAULT_SETTINGS.ignorePatterns],
+				activityLogs: [],
 			};
 		}
 
@@ -154,9 +160,21 @@ export const FilenSyncSettings = {
 			),
 			syncIntervalMinutes: readNumber(value.syncIntervalMinutes, DEFAULT_SETTINGS.syncIntervalMinutes),
 			syncStartupDelaySeconds: readNumber(value.syncStartupDelaySeconds, DEFAULT_SETTINGS.syncStartupDelaySeconds),
+			syncPaused: readBoolean(value.syncPaused, DEFAULT_SETTINGS.syncPaused),
+			activityLogs: readActivityLogs(value.activityLogs),
 		};
 	},
 } as const;
+
+export const getVaultRemoteRoot = (remoteRoot: string, vaultName: string): string => {
+	const root = normalizeRemoteRoot(remoteRoot || DEFAULT_REMOTE_ROOT);
+	const vaultSegment = normalizeRemoteSegment(vaultName || "default");
+	if (root.split("/").filter(Boolean).pop() === vaultSegment) {
+		return root;
+	}
+
+	return `${root.replace(/\/+$/u, "")}/${vaultSegment}`;
+};
 
 export class FilenSyncSettingTab extends PluginSettingTab {
 	constructor(app: App, private readonly plugin: FilenSyncPlugin) {
@@ -171,8 +189,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const intro = containerEl.createDiv({ cls: "filen-sync-settings-hero" });
 		intro.createDiv({ text: "Obsidian Filen Sync", cls: "filen-sync-settings-hero-title" });
 		intro.createEl("p", {
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			text: "Keep this vault mirrored in Filen with an Obsidian-native flow: connect once, review activity, then run sync on demand or in the background.",
+			text: "Mirror this vault to a Filen folder with manual sync, optional auto-sync, and conflict copies.",
 		});
 
 		this.renderAccountSection(containerEl);
@@ -184,8 +201,8 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 	private renderAccountSection(containerEl: HTMLElement): void {
 		const section = createSection(
 			containerEl,
-			"Account and authentication",
-			"Connect your Filen account once. Password and 2FA stay in memory for the current Obsidian session only.",
+			"Account",
+			"Connect to Filen. Your password and two-factor code are kept only for this Obsidian session.",
 		);
 
 		if (this.plugin.hasSavedAuth()) {
@@ -197,8 +214,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 				cls: "filen-sync-settings-card-title",
 			});
 			card.createEl("p", {
-				// eslint-disable-next-line obsidianmd/ui/sentence-case
-				text: "Your saved Filen session is stored in plugin data so you do not need to re-enter your password on every launch.",
+				text: "Session saved.",
 				cls: "filen-sync-settings-card-copy",
 			});
 			const actions = card.createDiv({ cls: "filen-sync-settings-card-actions" });
@@ -211,22 +227,20 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 				})();
 			});
 			card.createEl("p", {
-				text: "To switch accounts, disconnect first, then enter the new account email and password below.",
+				text: "Disconnect to switch accounts.",
 				cls: "filen-sync-settings-card-note",
 			});
 
 			new Setting(section)
 				.setName("Account email")
-				// eslint-disable-next-line obsidianmd/ui/sentence-case
-				.setDesc("Saved with your authenticated Filen session.")
+				.setDesc("Saved account.")
 				.addText((text) => text.setValue(this.plugin.settings.email).setDisabled(true));
 			return;
 		}
 
 		new Setting(section)
 			.setName("Email")
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			.setDesc("Your Filen account email.")
+			.setDesc("Filen account email.")
 			.addText((text) =>
 				text
 					// eslint-disable-next-line obsidianmd/ui/sentence-case
@@ -240,7 +254,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Password")
-			.setDesc("Used once to authenticate. It is never stored in plugin settings.")
+			.setDesc("Not stored.")
 			.addText((text) => {
 				text.inputEl.type = "password";
 				text
@@ -252,25 +266,41 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Two-factor code")
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			.setDesc("Only needed if your Filen account uses 2FA.")
+			.setDesc("If enabled.")
 			.addText((text) =>
 				text.setPlaceholder("123456").onChange((value) => {
 					this.plugin.setSessionTwoFactorCode(value.trim());
 				}),
+			);
+
+		new Setting(section)
+			.setName("Login")
+			.setDesc("Connect to Filen.")
+			.addButton((button) =>
+				button
+					.setButtonText("Login")
+					.setCta()
+					.onClick(async () => {
+						try {
+							await this.plugin.testConnection();
+							this.display();
+						} catch (error) {
+							// Error is already handled by testConnection notice
+						}
+					}),
 			);
 	}
 
 	private renderSyncSection(containerEl: HTMLElement): void {
 		const section = createSection(
 			containerEl,
-			"Sync strategy",
-			"Use Sync now for the standard bidirectional flow. Push and pull remain available in the Actions section and the command palette when you want one-way control.",
+			"Sync",
+			"Choose the Filen mirror folder and decide which vault paths should be ignored.",
 		);
 
 		new Setting(section)
 			.setName("Remote folder")
-			.setDesc("Filen folder that mirrors this vault. Keep separate folders for separate vaults.")
+			.setDesc("Base Filen folder. The vault name is appended automatically.")
 			.addText((text) =>
 				text
 					.setPlaceholder(DEFAULT_REMOTE_ROOT)
@@ -278,23 +308,24 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					.onChange(async (value) => {
 						this.plugin.settings.remoteRoot = value.trim() || DEFAULT_REMOTE_ROOT;
 						await this.plugin.saveSettings();
+						this.plugin.refreshSyncTarget();
 					}),
 			);
 
 		new Setting(section)
 			.setName("Vault name")
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			.setDesc("Stored in the sync log so Filen can tell one vault device from another.")
+			.setDesc("Used in sync logs.")
 			.addText((text) =>
 				text.setValue(this.plugin.settings.vaultName).onChange(async (value) => {
 					this.plugin.settings.vaultName = value.trim() || "default";
 					await this.plugin.saveSettings();
+					this.plugin.refreshSyncTarget();
 				}),
 			);
 
 		new Setting(section)
 			.setName("Ignore paths")
-			.setDesc("One vault-relative path or glob per line. Exact paths also ignore subfolders. Defaults skip Obsidian cache and workspace state files.")
+			.setDesc("One path or glob per line.")
 			.addTextArea((text) => {
 				text
 					.setPlaceholder(DEFAULT_IGNORE_PATTERNS.join("\n"))
@@ -308,11 +339,14 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			});
 
 		const note = section.createDiv({ cls: "filen-sync-settings-note" });
-		note.createEl("strong", { text: "Conflict handling" });
-		note.createSpan({ text: " When both sides changed, Obsidian Filen Sync keeps a local conflict copy before applying the chosen side." });
+		note.createEl("strong", { text: "Effective remote folder" });
+		note.createSpan({ text: ` ${getVaultRemoteRoot(this.plugin.settings.remoteRoot, this.plugin.settings.vaultName)}` });
+
+		const conflictNote = section.createDiv({ cls: "filen-sync-settings-note" });
+		conflictNote.createEl("strong", { text: "Conflict handling" });
+		conflictNote.createSpan({ text: " Local conflict copies are kept." });
 		section.createEl("p", {
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			text: "The Obsidian Filen Sync plugin data folder is always ignored automatically.",
+			text: "Plugin data is ignored automatically.",
 			cls: "filen-sync-settings-note",
 		});
 	}
@@ -321,12 +355,23 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const section = createSection(
 			containerEl,
 			"Auto-sync",
-			"Match the feel of Obsidian Sync with a few lightweight background triggers. Keep them conservative for large vaults.",
+			"Optional background sync triggers.",
 		);
 
 		new Setting(section)
+			.setName("Auto-sync paused")
+			.setDesc("Pause background triggers without disabling manual sync.")
+			.addToggle((toggle) =>
+				toggle.setValue(this.plugin.settings.syncPaused).onChange(async (value) => {
+					this.plugin.settings.syncPaused = value;
+					await this.plugin.saveSettings();
+					this.plugin.refreshAutoSync();
+				}),
+			);
+
+		new Setting(section)
 			.setName("Sync on file save")
-			.setDesc("Run a bidirectional sync shortly after the active file changes.")
+			.setDesc("Sync after file changes.")
 			.addToggle((toggle) =>
 				toggle.setValue(this.plugin.settings.syncOnSave).onChange(async (value) => {
 					this.plugin.settings.syncOnSave = value;
@@ -338,7 +383,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const delaySetting = new Setting(section);
 		delaySetting
 			.setName(`Sync on save delay (${this.plugin.settings.syncOnSaveDelaySeconds} sec)`)
-			.setDesc("Wait this long after a save before syncing. Minimum 5 seconds.")
+			.setDesc("Delay before syncing.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(5, 30, 1)
@@ -355,7 +400,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const intervalSetting = new Setting(section);
 		intervalSetting
 			.setName(`Background sync interval (${formatInterval(this.plugin.settings.syncIntervalMinutes)})`)
-			.setDesc("Run a background sync every set number of minutes. Set to 0 to disable.")
+			.setDesc("Set 0 to disable.")
 			.addSlider((slider) =>
 				slider
 					.setLimits(0, 60, 1)
@@ -371,7 +416,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Sync after startup")
-			.setDesc("Delay the first automatic sync after Obsidian launches. Set to 0 to disable. Takes effect on the next restart.")
+			.setDesc("Set 0 to disable.")
 			.addText((text) =>
 				text.setPlaceholder("0").setValue(String(this.plugin.settings.syncStartupDelaySeconds)).onChange(async (value) => {
 					const parsed = Number.parseInt(value, 10);
@@ -388,13 +433,12 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const section = createSection(
 			containerEl,
 			"Actions",
-			"Manual controls stay available for first syncs, one-way recovery, and spot-checking your Filen connection.",
+			"Run manual tasks.",
 		);
 
 		new Setting(section)
 			.setName("Test connection")
-			// eslint-disable-next-line obsidianmd/ui/sentence-case
-			.setDesc("Verify that your Filen account and remote folder are reachable.")
+			.setDesc("Check account and folder.")
 			.addButton((button) =>
 				button.setButtonText("Test").onClick(() => {
 					void this.plugin.testConnection();
@@ -402,50 +446,15 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(section)
-			.setName("Open activity log")
-			.setDesc("Review the latest scan summary and recent per-file activity.")
-			.addButton((button) =>
-				button.setButtonText("Open").onClick(() => {
-					void this.plugin.openProgressView();
-				}),
-			);
-
-		new Setting(section)
 			.setName("Sync now")
-			.setDesc("Compare local and remote changes, then apply the needed uploads, downloads, and deletes.")
+			.setDesc("Run bidirectional sync.")
 			.addButton((button) =>
 				button.setButtonText("Sync").setCta().onClick(() => {
 					void this.plugin.syncNow();
 				}),
 			);
-
-		new Setting(section)
-			.setName("Push changed local files")
-			.setDesc("Upload local changes only.")
-			.addButton((button) =>
-				button.setButtonText("Push").onClick(() => {
-					void this.plugin.pushLocalChanges();
-				}),
-			);
-
-		new Setting(section)
-			.setName("Preview sync plan")
-			.setDesc("See what would change before running sync.")
-			.addButton((button) =>
-				button.setButtonText("Preview").onClick(() => {
-					void this.plugin.previewSyncPlan();
-				}),
-			);
-
-		new Setting(section)
-			.setName("Pull changed remote files")
-			.setDesc("Download remote changes only.")
-			.addButton((button) =>
-				button.setButtonText("Pull").onClick(() => {
-					void this.plugin.pullRemoteChanges();
-				}),
-			);
 	}
+
 }
 
 const createSection = (containerEl: HTMLElement, title: string, description: string): HTMLElement => {
@@ -453,6 +462,20 @@ const createSection = (containerEl: HTMLElement, title: string, description: str
 	section.createDiv({ text: title, cls: "filen-sync-settings-section-title" });
 	section.createEl("p", { text: description, cls: "filen-sync-settings-section-description" });
 	return section;
+};
+
+const normalizeRemoteRoot = (path: string): string => {
+	const normalized = path.trim().replace(/\\/gu, "/").replace(/\/+/gu, "/").replace(/\/+$/u, "");
+	if (normalized.length === 0 || normalized === "/") {
+		return DEFAULT_REMOTE_ROOT;
+	}
+
+	return normalized.startsWith("/") ? normalized : `/${normalized}`;
+};
+
+const normalizeRemoteSegment = (segment: string): string => {
+	const normalized = segment.trim().replace(/\\/gu, "/").split("/").filter(Boolean).join("-");
+	return normalized.length > 0 ? normalized : "default";
 };
 
 const formatInterval = (minutes: number): string => (minutes === 0 ? "Off" : `${minutes} min`);

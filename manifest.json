@@ -3,7 +3,7 @@
 	"name": "Obsidian Filen Sync",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Manual Obsidian vault sync through a Filen folder mirror.",
-	"author": "agustiawan",
+	"description": "Sync your Obsidian vault with Filen using a direct folder mirror, optional auto-sync, conflict copies, and file versions.",
+	"author": "Ilham Agustiawan",
 	"isDesktopOnly": false
 }

@@ -33,6 +33,10 @@
 	animation: filen-sync-spin 1s linear infinite;
 }
 
+.filen-sync-status-item.is-idle {
+	color: var(--text-error);
+}
+
 .filen-sync-status-item.is-success {
 	color: var(--text-success);
 }
@@ -157,6 +161,157 @@
 	padding: 12px 14px;
 	border-radius: 10px;
 	background: var(--background-secondary);
+}
+
+.filen-sync-settings-log-preview {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	max-height: 220px;
+	overflow: auto;
+	padding: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-secondary);
+}
+
+.filen-sync-activity-log-modal {
+	width: min(760px, calc(100vw - 32px));
+}
+
+.filen-sync-activity-log-modal .modal-content {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+}
+
+.filen-sync-activity-log-modal h2 {
+	margin: 0;
+}
+
+.filen-sync-activity-log-description {
+	margin: 0;
+	color: var(--text-muted);
+	line-height: 1.45;
+}
+
+.filen-sync-activity-log-actions,
+.filen-sync-activity-log-filters {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+}
+
+.filen-sync-activity-log-filter.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.filen-sync-activity-log-search input {
+	width: 100%;
+}
+
+.filen-sync-activity-log-summary {
+	color: var(--text-muted);
+	font-size: 0.88em;
+}
+
+.filen-sync-activity-log-list {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	max-height: min(60vh, 560px);
+	overflow: auto;
+	padding: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 10px;
+	background: var(--background-secondary);
+}
+
+.filen-sync-activity-log-line {
+	font-family: var(--font-monospace);
+	font-size: 0.85em;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.filen-sync-activity-log-row {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	padding: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-primary);
+}
+
+.filen-sync-activity-log-row.is-error,
+.filen-sync-activity-log-row.is-account,
+.filen-sync-activity-log-row.is-network {
+	border-color: color-mix(in srgb, var(--text-error) 40%, var(--background-modifier-border));
+}
+
+.filen-sync-activity-log-row.is-conflict {
+	border-color: color-mix(in srgb, var(--text-warning) 45%, var(--background-modifier-border));
+}
+
+.filen-sync-activity-log-row-meta {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 8px;
+}
+
+.filen-sync-activity-log-time {
+	font-family: var(--font-monospace);
+	font-size: 0.82em;
+	color: var(--text-muted);
+}
+
+.filen-sync-activity-log-kind {
+	display: inline-flex;
+	align-items: center;
+	padding: 1px 7px;
+	border-radius: 999px;
+	background: color-mix(in srgb, var(--text-muted) 14%, transparent);
+	color: var(--text-muted);
+	font-size: 0.72em;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.filen-sync-activity-log-kind.is-error,
+.filen-sync-activity-log-kind.is-account,
+.filen-sync-activity-log-kind.is-network {
+	background: color-mix(in srgb, var(--text-error) 16%, transparent);
+	color: var(--text-error);
+}
+
+.filen-sync-activity-log-kind.is-skipped {
+	background: color-mix(in srgb, var(--text-muted) 16%, transparent);
+	color: var(--text-muted);
+}
+
+.filen-sync-activity-log-kind.is-conflict {
+	background: color-mix(in srgb, var(--text-warning) 18%, transparent);
+	color: var(--text-warning);
+}
+
+.filen-sync-activity-log-message {
+	font-family: var(--font-monospace);
+	font-size: 0.85em;
+	line-height: 1.45;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.filen-sync-activity-log-empty {
+	color: var(--text-muted);
+	font-size: 0.9em;
+	text-align: center;
+	padding: 12px;
 }
 
 .filen-sync-progress-view {
