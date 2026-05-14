@@ -217,7 +217,7 @@ export class FilenRemoteFs implements RemoteFs {
 			chunks: version.chunks,
 		});
 		const reader = stream.getReader();
-		const buffers: Buffer[] = [];
+		const buffers: Uint8Array[] = [];
 		let total = 0;
 		for (;;) {
 			const { done, value } = await reader.read();

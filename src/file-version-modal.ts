@@ -6,7 +6,7 @@ type FileVersionModalConfig = {
 	remote: RemoteFs;
 	filePath: string;
 	fileName: string;
-	onRestored: () => void;
+	onRestored: () => Promise<void> | void;
 };
 
 type VersionGroup = {
@@ -147,12 +147,12 @@ export class FileVersionModal extends Modal {
 			});
 
 			const rowsEl = groupEl.createDiv({ cls: "filen-sync-version-rows" });
-			if (!group.expanded) rowsEl.style.display = "none";
+			rowsEl.toggleClass("is-collapsed", !group.expanded);
 
 			header.addEventListener("click", () => {
 				group.expanded = !group.expanded;
 				arrow.setText(group.expanded ? "▾" : "▸");
-				rowsEl.style.display = group.expanded ? "" : "none";
+				rowsEl.toggleClass("is-collapsed", !group.expanded);
 			});
 
 			for (const version of group.versions) {
@@ -174,7 +174,8 @@ export class FileVersionModal extends Modal {
 		const header = container.createDiv({ cls: "filen-sync-version-header" });
 
 		if (Platform.isMobile) {
-			const backBtn = header.createEl("button", { text: "← Back", cls: "filen-sync-version-back" });
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
+		const backBtn = header.createEl("button", { text: "← Back", cls: "filen-sync-version-back" });
 			backBtn.addEventListener("click", () => {
 				state.mobileView = "list";
 				this.render();
@@ -300,8 +301,13 @@ export class FileVersionModal extends Modal {
 		this.render();
 		try {
 			await this.config.remote.restoreFileVersion(this.config.filePath, version.uuid);
-			new Notice(`Restored version from ${formatTime(version.timestamp)}`);
-			this.config.onRestored();
+			try {
+				await this.config.onRestored();
+				new Notice(`Restored version from ${formatTime(version.timestamp)}`);
+			} catch (syncError) {
+				const msg = syncError instanceof Error ? syncError.message : "Unknown error";
+				new Notice(`Version restored on Filen, but local sync failed: ${msg}. Run Sync now.`);
+			}
 			this.close();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";

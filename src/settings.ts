@@ -189,6 +189,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 		const intro = containerEl.createDiv({ cls: "filen-sync-settings-hero" });
 		intro.createDiv({ text: "Obsidian Filen Sync", cls: "filen-sync-settings-hero-title" });
 		intro.createEl("p", {
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			text: "Mirror this vault to a Filen folder with manual sync, optional auto-sync, and conflict copies.",
 		});
 
@@ -275,6 +276,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Login")
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc("Connect to Filen.")
 			.addButton((button) =>
 				button
@@ -284,7 +286,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 						try {
 							await this.plugin.testConnection();
 							this.display();
-						} catch (error) {
+						} catch {
 							// Error is already handled by testConnection notice
 						}
 					}),
@@ -300,6 +302,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		new Setting(section)
 			.setName("Remote folder")
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			.setDesc("Base Filen folder. The vault name is appended automatically.")
 			.addText((text) =>
 				text

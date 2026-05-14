@@ -56,8 +56,7 @@ async function doRequest(
 		if (data instanceof ArrayBuffer) {
 			body = data;
 		} else if (ArrayBuffer.isView(data)) {
-			const view = data as ArrayBufferView;
-			body = view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength);
+			body = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 		} else {
 			// Encode as UTF-8 ArrayBuffer. The Filen API validates a SHA-512 checksum
 			// computed as Buffer.from(JSON.stringify(data), "utf-8") — sending as

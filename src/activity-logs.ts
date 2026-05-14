@@ -117,10 +117,53 @@ export class ActivityLogModal extends Modal {
 		}
 	}
 
-	private async clearLogs(): Promise<void> {
-		if (!confirm("Clear activity logs?")) return;
-		await this.host.clearActivityLogs();
-		new Notice("Activity logs cleared.");
+	private clearLogs(): void {
+		void confirmAction(this.app, "Clear activity logs?",
+			"This removes recent sync activity from plugin settings.", "Clear logs")
+			.then(async (confirmed) => {
+				if (!confirmed) return;
+				await this.host.clearActivityLogs();
+				new Notice("Activity logs cleared.");
+			});
+	}
+}
+
+const confirmAction = (app: App, title: string, message: string, confirmText: string): Promise<boolean> =>
+	new Promise((resolve) => { new ConfirmModal(app, title, message, confirmText, resolve).open(); });
+
+class ConfirmModal extends Modal {
+	private resolved = false;
+
+	constructor(
+		app: App,
+		private readonly title: string,
+		private readonly message: string,
+		private readonly confirmText: string,
+		private readonly resolve: (confirmed: boolean) => void,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl("h2", { text: this.title });
+		this.contentEl.createEl("p", { text: this.message });
+		const btns = this.contentEl.createDiv({ cls: "modal-button-container" });
+		const cancel = btns.createEl("button", { text: "Cancel" });
+		cancel.addEventListener("click", () => { this.finish(false); });
+		const confirm = btns.createEl("button", { text: this.confirmText });
+		confirm.addClass("mod-warning");
+		confirm.addEventListener("click", () => { this.finish(true); });
+	}
+
+	onClose(): void {
+		if (!this.resolved) this.resolve(false);
+		this.contentEl.empty();
+	}
+
+	private finish(confirmed: boolean): void {
+		this.resolved = true;
+		this.resolve(confirmed);
+		this.close();
 	}
 }
 

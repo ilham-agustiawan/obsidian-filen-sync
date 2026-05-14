@@ -59,6 +59,13 @@ type StatusBarState = {
 	updatedAt: number | null;
 };
 
+type SyncRunResult =
+	| { kind: "applied"; applied: number; conflicts: number }
+	| { kind: "up-to-date" }
+	| { kind: "skipped"; reason: string }
+	| { kind: "cancelled"; reason: string }
+	| { kind: "failed"; message: string };
+
 const AUTO_SYNC_SUCCESS_COOLDOWN_MS = 30_000;
 const AUTO_SYNC_FAILURE_BASE_BACKOFF_MS = 30_000;
 const AUTO_SYNC_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -121,6 +128,7 @@ export default class FilenSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "test-filen-connection",
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			name: "Test Filen connection",
 			callback: () => { void this.testConnection(); },
 		});
@@ -262,6 +270,7 @@ export default class FilenSyncPlugin extends Plugin {
 			const engine = this.getSyncEngine();
 			await withRetry(() => engine.testRemote());
 			this.logActivity("Connected to server");
+			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			new Notice("Connection test: ok");
 			this.setStatus("Connection ok", "success", `Connected as ${this.settings.email}.`);
 		} catch (error) {
@@ -477,11 +486,12 @@ export default class FilenSyncPlugin extends Plugin {
 	private async runSync(
 		label: string,
 		options: { silent?: boolean; autoSync?: boolean } = {},
-	): Promise<void> {
+	): Promise<SyncRunResult> {
 		if (this.isSyncing) {
+			const reason = "Sync already in progress.";
 			this.logActivity(`${label} skipped: sync already in progress`);
-			if (!options.silent) new Notice("Sync already in progress.");
-			return;
+			if (!options.silent) new Notice(reason);
+			return { kind: "skipped", reason };
 		}
 
 		this.isSyncing = true;
@@ -508,10 +518,11 @@ export default class FilenSyncPlugin extends Plugin {
 			));
 
 			if (result.cancelled) {
+				const reason = "Local deletes need confirmation. Run Sync now.";
 				this.logActivity("Sync paused. Local deletes need confirmation.");
-				this.setStatus("Sync paused", "warning", "Local deletes need confirmation. Run Sync now.");
+				this.setStatus("Sync paused", "warning", reason);
 				if (options.autoSync) this.resetAutoSyncBackoff();
-				return;
+				return { kind: "cancelled", reason };
 			}
 
 			if (options.autoSync) this.resetAutoSyncBackoff();
@@ -519,7 +530,7 @@ export default class FilenSyncPlugin extends Plugin {
 			if (result.applied === 0 && result.conflicts === 0) {
 				this.logActivity("Fully synced");
 				this.setStatus("up to date", "success", "No changes detected.", null);
-				return;
+				return { kind: "up-to-date" };
 			}
 
 			const parts: string[] = [];
@@ -535,6 +546,8 @@ export default class FilenSyncPlugin extends Plugin {
 			} else if (result.conflicts > 0) {
 				new Notice(`Filen Sync: ${result.conflicts} conflict(s) — conflict copies saved in vault.`);
 			}
+
+			return { kind: "applied", applied: result.applied, conflicts: result.conflicts };
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "Unknown error";
 			this.logActivity(`${label} failed: ${message}`);
@@ -549,6 +562,7 @@ export default class FilenSyncPlugin extends Plugin {
 				this.syncEngine?.close();
 				this.syncEngine = null;
 			}
+			return { kind: "failed", message };
 		} finally {
 			this.isSyncing = false;
 			this.runPendingAutoSync();
@@ -671,10 +685,24 @@ export default class FilenSyncPlugin extends Plugin {
 				remote,
 				filePath: file.path,
 				fileName: file.name,
-				onRestored: () => { this.scheduleAutoSync(0); },
+				onRestored: async () => { await this.runRestoreSync(); },
 			}).open();
 		} catch (error) {
 			new Notice(error instanceof Error ? error.message : "Failed to open version history.");
+		}
+	}
+
+	private async runRestoreSync(): Promise<void> {
+		const result = await this.runSync("Restore sync", { silent: true });
+		switch (result.kind) {
+			case "applied":
+			case "up-to-date":
+				return;
+			case "skipped":
+			case "cancelled":
+				throw new Error(result.reason);
+			case "failed":
+				throw new Error(result.message);
 		}
 	}
 

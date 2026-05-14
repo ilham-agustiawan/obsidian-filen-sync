@@ -38,6 +38,7 @@ type EntrySyncResult = SyncResult & {
 	/** Pre-computed SHA-256 hash (set for upload/conflict-local-wins operations). */
 	hash?: string;
 	conflictCopyPath?: string;
+	conflictWinner?: "local" | "remote";
 };
 
 export type SyncOperation = "upload" | "download" | "delete-local" | "delete-remote" | "conflict" | "noop";
@@ -258,7 +259,12 @@ export class SyncEngine {
 		// Local only
 		if (local !== undefined && remote === undefined) {
 			if (prev !== undefined) {
-				// Baseline proves it was on both sides → remote was deleted → mirror locally
+				// Baseline proves it was on both sides → remote was deleted
+				// If local changed since baseline, it's delete-vs-modify: keep local
+				const localChange = await this.detectLocalChange(prev, local);
+				if (localChange.changed) {
+					return { applied: 1, conflicts: 1, detail: "Remote deleted; local changed (conflict copy made)", operation: "conflict", hash: localChange.hash, conflictWinner: "local" };
+				}
 				return { applied: 1, conflicts: 0, detail: "Remote deleted; removing local", operation: "delete-local" };
 			}
 			// Never synced → new local file
@@ -269,7 +275,11 @@ export class SyncEngine {
 		// Remote only
 		if (local === undefined && remote !== undefined) {
 			if (prev !== undefined) {
-				// Baseline proves it was on both sides → local was deleted → mirror remotely
+				// Baseline proves it was on both sides → local was deleted
+				// If remote changed since baseline, it's delete-vs-modify: keep remote
+				if (!sameRemoteRecord(prev, remote)) {
+					return { applied: 1, conflicts: 1, detail: "Local deleted; remote changed (conflict copy made)", operation: "conflict", conflictWinner: "remote" };
+				}
 				return { applied: 1, conflicts: 0, detail: "Local deleted; removing remote", operation: "delete-remote" };
 			}
 			// Never synced → new remote file
@@ -284,9 +294,9 @@ export class SyncEngine {
 			const newer = chooseNewer(local, remote);
 			if (newer === "local") {
 				const hash = await this.hashLocal(local);
-				return { applied: 1, conflicts: 1, detail: "No baseline; local is newer (conflict copy made)", operation: "conflict", hash };
+				return { applied: 1, conflicts: 1, detail: "No baseline; local is newer (conflict copy made)", operation: "conflict", hash, conflictWinner: "local" };
 			}
-			return { applied: 1, conflicts: 1, detail: "No baseline; remote is newer (conflict copy made)", operation: "conflict" };
+			return { applied: 1, conflicts: 1, detail: "No baseline; remote is newer (conflict copy made)", operation: "conflict", conflictWinner: "remote" };
 		}
 
 		// Both exist, with baseline → detect what changed
@@ -304,9 +314,9 @@ export class SyncEngine {
 		// Both changed → conflict: keep the newer side, save a conflict copy of the other
 		const newer = chooseNewer(local, remote);
 		if (newer === "local") {
-			return { applied: 1, conflicts: 1, detail: "Both changed; local newer (conflict copy made)", operation: "conflict", hash: localChange.hash };
+			return { applied: 1, conflicts: 1, detail: "Both changed; local newer (conflict copy made)", operation: "conflict", hash: localChange.hash, conflictWinner: "local" };
 		}
-		return { applied: 1, conflicts: 1, detail: "Both changed; remote newer (conflict copy made)", operation: "conflict" };
+		return { applied: 1, conflicts: 1, detail: "Both changed; remote newer (conflict copy made)", operation: "conflict", conflictWinner: "remote" };
 	}
 
 	private async applySyncEntry(entry: MixedEntry, plan: EntrySyncResult): Promise<EntrySyncResult> {
@@ -335,17 +345,22 @@ export class SyncEngine {
 			case "conflict": {
 				let conflictCopyPath: string | undefined;
 				if (entry.local !== undefined && entry.remote !== undefined) {
-					conflictCopyPath = await this.writeConflictCopy(entry.local.path) ?? undefined;
 					// plan.hash is set when local wins (computed during plan phase)
 					if (plan.hash !== undefined) {
+						// Local wins — preserve remote as the conflict copy
+						conflictCopyPath = await this.writeRemoteConflictCopy(entry.path, entry.remote);
 						await this.pushLocal(entry.path, entry.local, plan.hash);
 					} else {
+						// Remote wins — preserve local as the conflict copy
+						conflictCopyPath = await this.writeLocalConflictCopy(entry.local.path) ?? undefined;
 						await this.pullRemote(entry.path, entry.remote);
 					}
 				} else if (entry.local !== undefined) {
+					// Delete-vs-modify: remote deleted, local changed → re-upload local
 					const hash = plan.hash ?? await this.hashLocal(entry.local);
 					await this.pushLocal(entry.path, entry.local, hash);
 				} else if (entry.remote !== undefined) {
+					// Delete-vs-modify: local deleted, remote changed → restore remote locally
 					await this.pullRemote(entry.path, entry.remote);
 				}
 				return conflictCopyPath !== undefined ? { ...plan, conflictCopyPath } : plan;
@@ -432,15 +447,26 @@ export class SyncEngine {
 		return sha256Hex(content instanceof Uint8Array ? content : new Uint8Array(content));
 	}
 
-	private async writeConflictCopy(path: string): Promise<string | null> {
+	private async writeLocalConflictCopy(path: string): Promise<string | null> {
 		const file = this.config.app.vault.getAbstractFileByPath(path);
 		if (!(file instanceof TFile)) return null;
-		const copyPath = conflictCopyPath(file.path, this.config.settings.deviceId, Date.now());
+		const copyPath = conflictCopyPath(file.path, this.config.settings.deviceId, Date.now(), "local");
 		const content = await this.config.app.vault.readBinary(file);
 		await ensureLocalFolder(this.config.app, copyPath);
 		await this.config.app.vault.adapter.writeBinary(copyPath, content, {
 			mtime: file.stat.mtime,
 			ctime: file.stat.ctime,
+		});
+		return copyPath;
+	}
+
+	private async writeRemoteConflictCopy(path: string, remote: RemoteEntry): Promise<string> {
+		const bytes = await this.config.remote.readFile(path);
+		const copyPath = conflictCopyPath(path, this.config.settings.deviceId, Date.now(), "remote");
+		await ensureLocalFolder(this.config.app, copyPath);
+		await this.config.app.vault.adapter.writeBinary(copyPath, bytes, {
+			mtime: remote.mtime,
+			ctime: remote.mtime,
 		});
 		return copyPath;
 	}
@@ -493,10 +519,10 @@ const filterPrevRecords = (
 	return filtered;
 };
 
-const conflictCopyPath = (path: string, deviceId: string, timestamp: number): string => {
+const conflictCopyPath = (path: string, deviceId: string, timestamp: number, side: "local" | "remote"): string => {
 	const normalized = normalizePath(path);
 	const dotIndex = normalized.lastIndexOf(".");
-	const suffix = `.sync-conflict-${safePathSegment(deviceId)}-${timestamp}`;
+	const suffix = `.sync-conflict-${side}-${safePathSegment(deviceId)}-${timestamp}`;
 	return dotIndex <= 0 ? `${normalized}${suffix}` : `${normalized.slice(0, dotIndex)}${suffix}${normalized.slice(dotIndex)}`;
 };
 

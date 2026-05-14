@@ -77,15 +77,19 @@ class LocalForageDb implements SyncDb {
 
 		// Migration 0 → 1: upgrade existing records to v1 schema
 		if (this._schemaVersion < 1) {
+			const writes: Array<Promise<unknown>> = [];
 			await this.store.iterate<Record<string, unknown>, void>((value, key) => {
 				if (key === META_KEY) return;
 
 				// Ensure the record has the new optional fields
+				let changed = false;
 				if (typeof value.remoteUuid !== "string") {
 					value.remoteUuid = undefined;
+					changed = true;
 				}
 				if (typeof value.lastSyncAt !== "number") {
 					value.lastSyncAt = undefined;
+					changed = true;
 				}
 				if (
 					value.lastKnownSide !== "local" &&
@@ -93,10 +97,12 @@ class LocalForageDb implements SyncDb {
 					value.lastKnownSide !== "both"
 				) {
 					value.lastKnownSide = undefined;
+					changed = true;
 				}
 
-				void this.store.setItem(key, value);
+				if (changed) writes.push(this.store.setItem(key, value));
 			});
+			await Promise.all(writes);
 
 			this._schemaVersion = SYNC_DB_SCHEMA_VERSION;
 			await this.store.setItem(META_KEY, { schemaVersion: this._schemaVersion });

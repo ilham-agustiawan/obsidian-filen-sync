@@ -658,6 +658,10 @@
 	flex-shrink: 0;
 }
 
+.filen-sync-version-rows.is-collapsed {
+	display: none;
+}
+
 .filen-sync-version-row {
 	padding: 7px 16px 7px 20px;
 	cursor: pointer;
