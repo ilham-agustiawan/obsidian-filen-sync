@@ -1,12 +1,38 @@
-import { type App, type EventRef, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, setIcon } from "obsidian";
-import { ActivityLogModal, inferActivityLogKind, trimActivityLogs, type ActivityLogEntry, type ActivityLogKind } from "./activity-logs";
+import type {
+	TAbstractFile} from "obsidian";
+import {
+	type App,
+	type EventRef,
+	Menu,
+	Modal,
+	Notice,
+	Plugin,
+	TFile,
+	setIcon,
+} from "obsidian";
+import {
+	ActivityLogModal,
+	inferActivityLogKind,
+	trimActivityLogs,
+	type ActivityLogEntry,
+	type ActivityLogKind,
+} from "./activity-logs";
 import { SyncDb } from "./db";
 import { FileVersionModal } from "./file-version-modal";
 import { FilenRemoteFs } from "./fs-remote";
 import { FilenSyncSetupModal } from "./onboarding-modal";
 import { createSyncPathFilter } from "./path-filters";
-import { FilenSyncSettings, FilenSyncSettingTab, getVaultRemoteRoot } from "./settings";
-import { SyncEngine, type SyncActivityEvent, type SyncOperation, type SyncProgress } from "./sync-engine";
+import { PluginSecrets } from "./secrets";
+import { FilenSyncSettings, FilenSyncSettingTab, getVaultRemoteRoot, readFilenAuth, type FilenAuth } from "./settings";
+import {
+	SyncEngine,
+	type SyncActivityEvent,
+	type SyncOperation,
+	type SyncProgress,
+} from "./sync-engine";
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
 
 const hasSavedVaultName = (value: unknown): value is { vaultName: string } =>
 	typeof value === "object" &&
@@ -17,7 +43,11 @@ const hasSavedVaultName = (value: unknown): value is { vaultName: string } =>
 
 async function withRetry<T>(
 	fn: () => Promise<T>,
-	options: { maxRetries?: number; baseDelayMs?: number; shouldRetry?: (error: unknown) => boolean } = {},
+	options: {
+		maxRetries?: number;
+		baseDelayMs?: number;
+		shouldRetry?: (error: unknown) => boolean;
+	} = {},
 ): Promise<T> {
 	const { maxRetries = 2, baseDelayMs = 1000 } = options;
 	const shouldRetry = options.shouldRetry ?? isTransientError;
@@ -40,9 +70,23 @@ function isTransientError(error: unknown): boolean {
 	const message = error instanceof Error ? error.message : String(error);
 	const lower = message.toLowerCase();
 	const transientPatterns = [
-		"network", "timeout", "econnreset", "econnrefused", "etimedout",
-		"enotfound", "dns", "socket", "tls", "abort", "fetch failed",
-		"too many requests", "rate limit", "503", "502", "504", "429",
+		"network",
+		"timeout",
+		"econnreset",
+		"econnrefused",
+		"etimedout",
+		"enotfound",
+		"dns",
+		"socket",
+		"tls",
+		"abort",
+		"fetch failed",
+		"too many requests",
+		"rate limit",
+		"503",
+		"502",
+		"504",
+		"429",
 		"internal server error",
 	];
 	return transientPatterns.some((pattern) => lower.includes(pattern));
@@ -71,8 +115,10 @@ const AUTO_SYNC_FAILURE_BASE_BACKOFF_MS = 30_000;
 const AUTO_SYNC_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
 
 export default class FilenSyncPlugin extends Plugin {
-	settings: FilenSyncSettings;
-	private db!: SyncDb;
+	settings!: FilenSyncSettings;
+	private db: SyncDb | null = null;
+	private readonly secrets = new PluginSecrets(this.app);
+	private unloaded = false;
 	private sessionPassword = "";
 	private sessionTwoFactorCode = "";
 	private statusBarItemEl: HTMLElement | null = null;
@@ -102,8 +148,7 @@ export default class FilenSyncPlugin extends Plugin {
 	private activityLogsSaveTimer: number | null = null;
 
 	async onload() {
-		this.db = await SyncDb.open(this.app.vault.getName());
-		await this.db.runMigrations();
+		this.unloaded = false;
 		await this.loadSettings();
 
 		this.statusBarItemEl = this.addStatusBarItem();
@@ -115,40 +160,54 @@ export default class FilenSyncPlugin extends Plugin {
 		});
 		syncRibbonIcon.addClass("filen-sync-ribbon-sync");
 
-		const activityLogsRibbonIcon = this.addRibbonIcon("list", "Filen: open activity logs", () => {
-			this.openActivityLogs();
-		});
+		const activityLogsRibbonIcon = this.addRibbonIcon(
+			"list",
+			"Filen: open activity logs",
+			() => {
+				this.openActivityLogs();
+			},
+		);
 		activityLogsRibbonIcon.addClass("filen-sync-ribbon-activity-log");
 
 		this.addCommand({
 			id: "sync-now",
 			name: "Sync now",
-			callback: () => { void this.syncNow(); },
+			callback: () => {
+				void this.syncNow();
+			},
 		});
 
 		this.addCommand({
 			id: "test-filen-connection",
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
 			name: "Test Filen connection",
-			callback: () => { void this.testConnection(); },
+			callback: () => {
+				void this.testConnection();
+			},
 		});
 
 		this.addCommand({
 			id: "toggle-sync-on-save",
 			name: "Toggle sync on save",
-			callback: () => { void this.toggleSyncOnSave(); },
+			callback: () => {
+				void this.toggleSyncOnSave();
+			},
 		});
 
 		this.addCommand({
 			id: "toggle-auto-sync-paused",
 			name: "Pause or resume auto-sync",
-			callback: () => { void this.toggleSyncPaused(); },
+			callback: () => {
+				void this.toggleSyncPaused();
+			},
 		});
 
 		this.addCommand({
 			id: "open-activity-logs",
 			name: "Open activity logs",
-			callback: () => { this.openActivityLogs(); },
+			callback: () => {
+				this.openActivityLogs();
+			},
 		});
 
 		this.registerEvent(
@@ -158,14 +217,14 @@ export default class FilenSyncPlugin extends Plugin {
 		);
 
 		this.addSettingTab(new FilenSyncSettingTab(this.app, this));
-		this.setupAutoSync();
 		this.renderStatusBar();
 		this.app.workspace.onLayoutReady(() => {
-			this.maybePromptForSetup();
+			void this.initializeAfterLayoutReady();
 		});
 	}
 
 	onunload() {
+		this.unloaded = true;
 		this.teardownAutoSync();
 		if (this.activityLogsSaveTimer !== null) {
 			window.clearTimeout(this.activityLogsSaveTimer);
@@ -196,7 +255,7 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	hasSavedAuth(): boolean {
-		return this.settings.auth !== null;
+		return this.settings.hasAuth;
 	}
 
 	async clearSavedAuth() {
@@ -205,24 +264,70 @@ export default class FilenSyncPlugin extends Plugin {
 		this.remoteFs = null;
 		this.sessionPassword = "";
 		this.sessionTwoFactorCode = "";
-		this.settings.auth = null;
+		this.settings.hasAuth = false;
+		this.secrets.clear();
 		this.logActivity("Disconnected from server");
 		await this.saveSettings();
-		this.setStatus("Not connected", "idle", "Open settings to connect your Filen account.", null);
+		this.setStatus(
+			"Not connected",
+			"idle",
+			"Open settings to connect your Filen account.",
+			null,
+		);
 	}
 
 	async loadSettings() {
 		const saved: unknown = await this.loadData();
+
+		// Migration: move plain-text auth from data.json to vault-scoped secret storage.
+		if (isRecord(saved) && saved.auth !== null && saved.auth !== undefined) {
+			const auth = readFilenAuth(saved.auth);
+			if (auth !== null) {
+				this.secrets.setAuth(auth as FilenAuth);
+			}
+			// Scrub the plain-text credentials from data.json immediately.
+			// eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+			delete (saved as Record<string, unknown>).auth;
+			await this.saveData(saved);
+		}
+
 		this.settings = FilenSyncSettings.fromSaved(saved);
+
+		// If auth exists in secret storage, mark the connection as active.
+		if (this.secrets.hasAuth()) {
+			this.settings.hasAuth = true;
+		}
+
+		let shouldSave = false;
 
 		if (!hasSavedVaultName(saved)) {
 			this.settings.vaultName = this.app.vault.getName();
-			await this.saveSettings();
+			shouldSave = true;
 		}
 
 		if (this.settings.deviceId.length === 0) {
 			this.settings.deviceId = window.crypto.randomUUID();
+			shouldSave = true;
+		}
+
+		if (shouldSave) {
 			await this.saveSettings();
+		}
+	}
+
+	private async initializeAfterLayoutReady(): Promise<void> {
+		try {
+			const db = await SyncDb.open(this.app.vault.getName());
+			await db.runMigrations();
+			if (this.unloaded) return;
+			this.db = db;
+			this.setupAutoSync();
+			this.renderStatusBar();
+			this.maybePromptForSetup();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : "Unknown error";
+			console.error("Filen Sync: failed to initialize after layout ready", error);
+			if (!this.unloaded) this.setStatus("Initialization failed", "error", message);
 		}
 	}
 
@@ -282,29 +387,35 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	openSettingsTab(): void {
-		const settingManager = (this.app as App & {
-			setting: { open: () => void; openTabById: (id: string) => void };
-		}).setting;
+		const settingManager = (
+			this.app as App & {
+				setting: { open: () => void; openTabById: (id: string) => void };
+			}
+		).setting;
 		settingManager.open();
 		settingManager.openTabById(this.manifest.id);
 	}
 
 	setupAutoSync(): void {
-		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes, syncStartupDelaySeconds } = this.settings;
+		const { syncOnSave, syncOnSaveDelaySeconds, syncIntervalMinutes, syncStartupDelaySeconds } =
+			this.settings;
 		const activeFile = this.app.workspace.getActiveFile();
 		this.lastActiveFilePath = activeFile?.path ?? null;
 		if (this.settings.syncPaused) return;
 
-		this.workspaceEventRefs.push(this.app.workspace.on("file-open", (file) => {
-			this.lastActiveFilePath = file?.path ?? null;
-		}));
+		this.workspaceEventRefs.push(
+			this.app.workspace.on("file-open", (file) => {
+				this.lastActiveFilePath = file?.path ?? null;
+			}),
+		);
 
-		const handleVaultChange = (action: LocalFileActivityAction) => (file: TAbstractFile, oldPath?: string) => {
-			this.logLocalFileActivity(action, file, oldPath);
-			if (!syncOnSave || !this.shouldAutoSyncForFileEvent(file, oldPath)) return;
-			this.logActivity(`Auto-sync scheduled in ${syncOnSaveDelaySeconds}s`);
-			this.scheduleAutoSync(syncOnSaveDelaySeconds * 1000);
-		};
+		const handleVaultChange =
+			(action: LocalFileActivityAction) => (file: TAbstractFile, oldPath?: string) => {
+				this.logLocalFileActivity(action, file, oldPath);
+				if (!syncOnSave || !this.shouldAutoSyncForFileEvent(file, oldPath)) return;
+				this.logActivity(`Auto-sync scheduled in ${syncOnSaveDelaySeconds}s`);
+				this.scheduleAutoSync(syncOnSaveDelaySeconds * 1000);
+			};
 		this.vaultEventRefs.push(this.app.vault.on("modify", handleVaultChange("modified")));
 		this.vaultEventRefs.push(this.app.vault.on("create", handleVaultChange("created")));
 		this.vaultEventRefs.push(this.app.vault.on("delete", handleVaultChange("deleted")));
@@ -314,14 +425,21 @@ export default class FilenSyncPlugin extends Plugin {
 			this.registerAutoSyncDomEvent(document, "visibilitychange", () => {
 				if (document.visibilityState === "visible") this.scheduleAutoSync(1000);
 			});
-			this.registerAutoSyncDomEvent(window, "focus", () => { this.scheduleAutoSync(1000); });
-			this.registerAutoSyncDomEvent(window, "online", () => { this.scheduleAutoSync(1000); });
+			this.registerAutoSyncDomEvent(window, "focus", () => {
+				this.scheduleAutoSync(1000);
+			});
+			this.registerAutoSyncDomEvent(window, "online", () => {
+				this.scheduleAutoSync(1000);
+			});
 		}
 
 		if (syncIntervalMinutes > 0) {
-			this.intervalId = window.setInterval(() => {
-				this.requestAutoSync();
-			}, syncIntervalMinutes * 60 * 1000);
+			this.intervalId = window.setInterval(
+				() => {
+					this.requestAutoSync();
+				},
+				syncIntervalMinutes * 60 * 1000,
+			);
 		}
 
 		if (syncStartupDelaySeconds > 0) {
@@ -333,9 +451,18 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private teardownAutoSync(): void {
-		if (this.debounceTimer !== null) { window.clearTimeout(this.debounceTimer); this.debounceTimer = null; }
-		if (this.intervalId !== null) { window.clearInterval(this.intervalId); this.intervalId = null; }
-		if (this.startupTimerId !== null) { window.clearTimeout(this.startupTimerId); this.startupTimerId = null; }
+		if (this.debounceTimer !== null) {
+			window.clearTimeout(this.debounceTimer);
+			this.debounceTimer = null;
+		}
+		if (this.intervalId !== null) {
+			window.clearInterval(this.intervalId);
+			this.intervalId = null;
+		}
+		if (this.startupTimerId !== null) {
+			window.clearTimeout(this.startupTimerId);
+			this.startupTimerId = null;
+		}
 		for (const ref of this.vaultEventRefs) this.app.vault.offref(ref);
 		this.vaultEventRefs = [];
 		for (const ref of this.workspaceEventRefs) this.app.workspace.offref(ref);
@@ -377,7 +504,10 @@ export default class FilenSyncPlugin extends Plugin {
 	private requestAutoSync(): void {
 		if (!this.hasAutoSyncEnabled()) return;
 		if (!this.hasSavedAuth()) return;
-		if (this.isSyncing) { this.pendingAutoSync = true; return; }
+		if (this.isSyncing) {
+			this.pendingAutoSync = true;
+			return;
+		}
 		this.pendingAutoSync = false;
 		void this.runSync("Auto-sync", { silent: true, autoSync: true });
 	}
@@ -417,11 +547,25 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private hasAutoSyncEnabled(): boolean {
-		return !this.settings.syncPaused && (this.settings.syncOnSave || this.settings.syncIntervalMinutes > 0 || this.settings.syncStartupDelaySeconds > 0);
+		return (
+			!this.settings.syncPaused &&
+			(this.settings.syncOnSave ||
+				this.settings.syncIntervalMinutes > 0 ||
+				this.settings.syncStartupDelaySeconds > 0)
+		);
 	}
 
-	private logLocalFileActivity(action: LocalFileActivityAction, file: TAbstractFile, oldPath?: string): void {
-		if (this.isSyncing || !(file instanceof TFile) || !this.shouldLogFileActivity(file, oldPath)) return;
+	private logLocalFileActivity(
+		action: LocalFileActivityAction,
+		file: TAbstractFile,
+		oldPath?: string,
+	): void {
+		if (
+			this.isSyncing ||
+			!(file instanceof TFile) ||
+			!this.shouldLogFileActivity(file, oldPath)
+		)
+			return;
 		switch (action) {
 			case "created":
 				this.logActivity(`Local created ${file.path}`);
@@ -433,7 +577,11 @@ export default class FilenSyncPlugin extends Plugin {
 				this.logActivity(`Local deleted ${file.path}`);
 				return;
 			case "renamed":
-				this.logActivity(oldPath !== undefined ? `Local renamed ${oldPath} → ${file.path}` : `Local renamed ${file.path}`);
+				this.logActivity(
+					oldPath !== undefined
+						? `Local renamed ${oldPath} → ${file.path}`
+						: `Local renamed ${file.path}`,
+				);
 				return;
 		}
 	}
@@ -444,7 +592,10 @@ export default class FilenSyncPlugin extends Plugin {
 			pluginId: this.manifest.id,
 			ignorePatterns: this.settings.ignorePatterns,
 		});
-		return !pathFilter.isIgnored(file.path) && (oldPath === undefined || !pathFilter.isIgnored(oldPath));
+		return (
+			!pathFilter.isIgnored(file.path) &&
+			(oldPath === undefined || !pathFilter.isIgnored(oldPath))
+		);
 	}
 
 	private shouldAutoSyncForFileEvent(file: TAbstractFile, oldPath?: string): boolean {
@@ -455,7 +606,10 @@ export default class FilenSyncPlugin extends Plugin {
 			pluginId: this.manifest.id,
 			ignorePatterns: this.settings.ignorePatterns,
 		});
-		if (pathFilter.isIgnored(file.path) || (oldPath !== undefined && pathFilter.isIgnored(oldPath))) {
+		if (
+			pathFilter.isIgnored(file.path) ||
+			(oldPath !== undefined && pathFilter.isIgnored(oldPath))
+		) {
 			return false;
 		}
 
@@ -506,16 +660,25 @@ export default class FilenSyncPlugin extends Plugin {
 			// instead it notifies the user and defers to manual sync.
 			const confirmDeletes = options.silent
 				? async (paths: string[]) => {
-					new Notice(`Filen Sync: ${paths.length} local file(s) need deletion confirmation. Run Sync now.`);
-					return false;
-				}
+						new Notice(
+							`Filen Sync: ${paths.length} local file(s) need deletion confirmation. Run Sync now.`,
+						);
+						return false;
+					}
 				: (paths: string[]) => this.confirmLocalDeletes(paths);
 
-			const result = await withRetry(() => engine.sync(
-				(p: SyncProgress) => this.setStatus(`${label}…`, "syncing", `${p.current}/${p.total} · ${p.path}`),
-				confirmDeletes,
-				(event: SyncActivityEvent) => this.logSyncActivity(event),
-			));
+			const result = await withRetry(() =>
+				engine.sync(
+					(p: SyncProgress) =>
+						this.setStatus(
+							`${label}…`,
+							"syncing",
+							`${p.current}/${p.total} · ${p.path}`,
+						),
+					confirmDeletes,
+					(event: SyncActivityEvent) => this.logSyncActivity(event),
+				),
+			);
 
 			if (result.cancelled) {
 				const reason = "Local deletes need confirmation. Run Sync now.";
@@ -538,13 +701,21 @@ export default class FilenSyncPlugin extends Plugin {
 			if (result.conflicts > 0) parts.push(`${result.conflicts} conflict(s)`);
 			const summary = parts.join(", ");
 
-			this.logActivity(result.conflicts > 0 ? `Sync complete with ${summary}` : "Fully synced");
-			this.setStatus(summary, result.conflicts > 0 ? "warning" : "success", `${label}: ${summary}`);
+			this.logActivity(
+				result.conflicts > 0 ? `Sync complete with ${summary}` : "Fully synced",
+			);
+			this.setStatus(
+				summary,
+				result.conflicts > 0 ? "warning" : "success",
+				`${label}: ${summary}`,
+			);
 
 			if (!options.silent) {
 				new Notice(`${label}: ${summary}`);
 			} else if (result.conflicts > 0) {
-				new Notice(`Filen Sync: ${result.conflicts} conflict(s) — conflict copies saved in vault.`);
+				new Notice(
+					`Filen Sync: ${result.conflicts} conflict(s) — conflict copies saved in vault.`,
+				);
 			}
 
 			return { kind: "applied", applied: result.applied, conflicts: result.conflicts };
@@ -558,7 +729,11 @@ export default class FilenSyncPlugin extends Plugin {
 			this.setStatus(`${label} failed`, "error", message);
 			if (!options.silent) new Notice(`${label} failed: ${message}`);
 			console.error(`Filen Sync: ${label} failed`, error);
-			if (message.includes("API key") || message.includes("api key") || message.includes("auth expired")) {
+			if (
+				message.includes("API key") ||
+				message.includes("api key") ||
+				message.includes("auth expired")
+			) {
 				this.syncEngine?.close();
 				this.syncEngine = null;
 			}
@@ -622,7 +797,8 @@ export default class FilenSyncPlugin extends Plugin {
 		if (this.settings.email.length === 0) {
 			throw new Error("Filen email missing. Add it in plugin settings.");
 		}
-		if (this.settings.auth === null && this.sessionPassword.length === 0) {
+		const savedAuth = this.secrets.getAuth();
+		if (savedAuth === null && this.sessionPassword.length === 0) {
 			throw new Error("Filen password missing. Enter it once in plugin settings.");
 		}
 
@@ -632,10 +808,14 @@ export default class FilenSyncPlugin extends Plugin {
 				password: this.sessionPassword,
 				twoFactorCode: this.sessionTwoFactorCode,
 				remoteRoot: getVaultRemoteRoot(this.settings.remoteRoot, this.settings.vaultName),
-				auth: this.settings.auth,
+				auth: savedAuth as FilenAuth | null,
 				saveAuth: async (auth) => {
-					this.settings.auth = auth;
+					this.secrets.setAuth(auth);
+					this.settings.hasAuth = true;
 					this.settings.email = auth.email;
+					if (this.sessionPassword.length > 0) {
+						this.secrets.setPassword(this.sessionPassword);
+					}
 					await this.saveSettings();
 					if (!this.isSyncing) this.setDefaultStatus();
 					else this.renderStatusBar();
@@ -647,6 +827,11 @@ export default class FilenSyncPlugin extends Plugin {
 	}
 
 	private getSyncEngine(): SyncEngine {
+		if (!this.db) {
+			throw new Error(
+				"Database not initialized yet. Please wait for the vault to finish loading.",
+			);
+		}
 		const remote = this.getOrCreateRemoteFs();
 
 		if (this.syncEngine === null) {
@@ -668,12 +853,16 @@ export default class FilenSyncPlugin extends Plugin {
 		menu.addItem((item) => {
 			item.setTitle("Filen: sync now");
 			item.setIcon("refresh-cw");
-			item.onClick(() => { void this.syncNow(); });
+			item.onClick(() => {
+				void this.syncNow();
+			});
 		});
 		menu.addItem((item) => {
 			item.setTitle("Filen: version history");
 			item.setIcon("history");
-			item.onClick(() => { this.openVersionHistory(file); });
+			item.onClick(() => {
+				this.openVersionHistory(file);
+			});
 		});
 	}
 
@@ -685,7 +874,9 @@ export default class FilenSyncPlugin extends Plugin {
 				remote,
 				filePath: file.path,
 				fileName: file.name,
-				onRestored: async () => { await this.runRestoreSync(); },
+				onRestored: async () => {
+					await this.runRestoreSync();
+				},
 			}).open();
 		} catch (error) {
 			new Notice(error instanceof Error ? error.message : "Failed to open version history.");
@@ -724,23 +915,33 @@ export default class FilenSyncPlugin extends Plugin {
 		menu.addItem((item) => {
 			item.setTitle("Sync now");
 			item.setIcon("refresh-cw");
-			item.onClick(() => { void this.syncNow(); });
+			item.onClick(() => {
+				void this.syncNow();
+			});
 		});
 		menu.addItem((item) => {
 			item.setTitle(this.settings.syncPaused ? "Resume auto-sync" : "Pause auto-sync");
 			item.setIcon(this.settings.syncPaused ? "circle-play" : "pause");
-			item.onClick(() => { void this.toggleSyncPaused(); });
+			item.onClick(() => {
+				void this.toggleSyncPaused();
+			});
 		});
 		menu.addItem((item) => {
 			item.setTitle("Open activity log");
 			item.setIcon("align-left");
-			item.onClick(() => { this.openActivityLogs(); });
+			item.onClick(() => {
+				this.openActivityLogs();
+			});
 		});
 		menu.addSeparator();
 		menu.addItem((item) => {
-			item.setTitle(this.hasSavedAuth() ? "Open Obsidian Filen Sync settings" : "Connect Filen");
+			item.setTitle(
+				this.hasSavedAuth() ? "Open Obsidian Filen Sync settings" : "Connect Filen",
+			);
 			item.setIcon("settings");
-			item.onClick(() => { this.openSettingsTab(); });
+			item.onClick(() => {
+				this.openSettingsTab();
+			});
 		});
 		menu.showAtMouseEvent(event);
 	}
@@ -754,7 +955,10 @@ export default class FilenSyncPlugin extends Plugin {
 		}).open();
 	}
 
-	private logActivity(message: string, kind: ActivityLogKind = inferActivityLogKind(message)): void {
+	private logActivity(
+		message: string,
+		kind: ActivityLogKind = inferActivityLogKind(message),
+	): void {
 		this.settings.activityLogs = trimActivityLogs([
 			...this.settings.activityLogs,
 			{ at: Date.now(), message, kind },
@@ -778,27 +982,53 @@ export default class FilenSyncPlugin extends Plugin {
 	private setDefaultStatus(): void {
 		if (this.hasSavedAuth()) {
 			if (this.settings.syncPaused) {
-				this.setStatus("Paused", "warning", "Auto-sync is paused. Manual sync is still available.", null);
+				this.setStatus(
+					"Paused",
+					"warning",
+					"Auto-sync is paused. Manual sync is still available.",
+					null,
+				);
 				return;
 			}
 			this.setStatus("Ready", "success", `Connected as ${this.settings.email}.`, null);
 			return;
 		}
-		this.setStatus("Disconnected", "idle", "Open settings to connect your Filen account.", null);
+		this.setStatus(
+			"Disconnected",
+			"idle",
+			"Open settings to connect your Filen account.",
+			null,
+		);
 	}
 
-	private setStatus(text: string, kind: StatusBarKind, detail: string, updatedAt: number | null = Date.now()): void {
+	private setStatus(
+		text: string,
+		kind: StatusBarKind,
+		detail: string,
+		updatedAt: number | null = Date.now(),
+	): void {
 		this.statusBarState = { kind, text, detail, updatedAt };
 		this.renderStatusBar();
 	}
 
 	private renderStatusBar(): void {
-		if (this.statusBarItemEl === null || this.statusBarIconEl === null || this.statusBarTextEl === null) return;
+		if (
+			this.statusBarItemEl === null ||
+			this.statusBarIconEl === null ||
+			this.statusBarTextEl === null
+		)
+			return;
 
 		const iconOnly = isAllFilesSyncedStatus(this.statusBarState);
 		setIcon(this.statusBarIconEl, iconForStatus(this.statusBarState, iconOnly));
 		this.statusBarTextEl.setText(iconOnly ? "" : `Filen ${this.statusBarState.text}`);
-		this.statusBarItemEl.removeClass("is-idle", "is-syncing", "is-success", "is-warning", "is-error");
+		this.statusBarItemEl.removeClass(
+			"is-idle",
+			"is-syncing",
+			"is-success",
+			"is-warning",
+			"is-error",
+		);
 		this.statusBarItemEl.addClass(`is-${this.statusBarState.kind}`);
 		this.statusBarItemEl.toggleClass("is-icon-only", iconOnly);
 		const tooltip = this.buildStatusTooltip();
@@ -810,9 +1040,10 @@ export default class FilenSyncPlugin extends Plugin {
 		const statusText = isAllFilesSyncedStatus(this.statusBarState)
 			? "All files synced"
 			: this.statusBarState.text;
-		const detailText = this.statusBarState.text === "Ready"
-			? "No pending changes detected."
-			: this.statusBarState.detail;
+		const detailText =
+			this.statusBarState.text === "Ready"
+				? "No pending changes detected."
+				: this.statusBarState.detail;
 
 		const lines = [
 			statusText,
@@ -832,14 +1063,22 @@ export default class FilenSyncPlugin extends Plugin {
 	private describeAutoSync(): string {
 		if (this.settings.syncPaused) return "paused";
 		const parts: string[] = [];
-		if (this.settings.syncOnSave) parts.push(`on save (${this.settings.syncOnSaveDelaySeconds}s delay)`);
-		if (this.settings.syncIntervalMinutes > 0) parts.push(`every ${this.settings.syncIntervalMinutes} min`);
-		if (this.settings.syncStartupDelaySeconds > 0) parts.push(`${this.settings.syncStartupDelaySeconds}s after startup`);
+		if (this.settings.syncOnSave)
+			parts.push(`on save (${this.settings.syncOnSaveDelaySeconds}s delay)`);
+		if (this.settings.syncIntervalMinutes > 0)
+			parts.push(`every ${this.settings.syncIntervalMinutes} min`);
+		if (this.settings.syncStartupDelaySeconds > 0)
+			parts.push(`${this.settings.syncStartupDelaySeconds}s after startup`);
 		return parts.length > 0 ? parts.join(", ") : "off";
 	}
 }
 
-const confirmAction = (app: App, title: string, message: string, confirmText: string): Promise<boolean> =>
+const confirmAction = (
+	app: App,
+	title: string,
+	message: string,
+	confirmText: string,
+): Promise<boolean> =>
 	new Promise((resolve) => {
 		new ConfirmActionModal(app, title, message, confirmText, resolve).open();
 	});
@@ -864,11 +1103,15 @@ class ConfirmActionModal extends Modal {
 
 		const actions = this.contentEl.createDiv({ cls: "modal-button-container" });
 		const cancelButton = actions.createEl("button", { text: "Cancel" });
-		cancelButton.addEventListener("click", () => { this.finish(false); });
+		cancelButton.addEventListener("click", () => {
+			this.finish(false);
+		});
 
 		const confirmButton = actions.createEl("button", { text: this.confirmText });
 		confirmButton.addClass("mod-warning");
-		confirmButton.addEventListener("click", () => { this.finish(true); });
+		confirmButton.addEventListener("click", () => {
+			this.finish(true);
+		});
 	}
 
 	onClose(): void {
@@ -890,43 +1133,67 @@ const iconForStatus = (state: StatusBarState, iconOnly = false): string => {
 	if (iconOnly) return "refresh-cw";
 	if (state.text === "Paused") return "pause";
 	switch (state.kind) {
-		case "syncing": return "refresh-cw";
-		case "success": return "check";
-		case "warning": return "alert-triangle";
-		case "error": return "x-circle";
-		default: return "cloud-off";
+		case "syncing":
+			return "refresh-cw";
+		case "success":
+			return "check";
+		case "warning":
+			return "alert-triangle";
+		case "error":
+			return "x-circle";
+		default:
+			return "cloud-off";
 	}
 };
 
 const syncOperationStartMessage = (operation: SyncOperation, path: string): string => {
 	switch (operation) {
-		case "upload": return `Uploading file ${path}`;
-		case "download": return `Downloading file ${path}`;
-		case "delete-local": return `Deleting local file ${path}`;
-		case "delete-remote": return `Deleting remote file ${path}`;
-		case "conflict": return `Resolving conflict ${path}`;
-		default: return `Syncing ${path}`;
+		case "upload":
+			return `Uploading file ${path}`;
+		case "download":
+			return `Downloading file ${path}`;
+		case "delete-local":
+			return `Deleting local file ${path}`;
+		case "delete-remote":
+			return `Deleting remote file ${path}`;
+		case "conflict":
+			return `Resolving conflict ${path}`;
+		default:
+			return `Syncing ${path}`;
 	}
 };
 
 const syncOperationCompleteMessage = (operation: SyncOperation, path: string): string => {
 	switch (operation) {
-		case "upload": return `Uploading complete ${path}`;
-		case "download": return `Downloading complete ${path}`;
-		case "delete-local": return `Local delete complete ${path}`;
-		case "delete-remote": return `Remote delete complete ${path}`;
-		case "conflict": return `Conflict resolved ${path}`;
-		default: return `Sync complete ${path}`;
+		case "upload":
+			return `Uploading complete ${path}`;
+		case "download":
+			return `Downloading complete ${path}`;
+		case "delete-local":
+			return `Local delete complete ${path}`;
+		case "delete-remote":
+			return `Remote delete complete ${path}`;
+		case "conflict":
+			return `Conflict resolved ${path}`;
+		default:
+			return `Sync complete ${path}`;
 	}
 };
 
 const formatStatusTime = (epochMs: number): string =>
-	new Date(epochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+	new Date(epochMs).toLocaleTimeString([], {
+		hour: "2-digit",
+		minute: "2-digit",
+		second: "2-digit",
+	});
 
 const getAutoSyncBackoffMs = (error: unknown, failureCount: number): number => {
 	const retryAfterMs = readRetryAfterMs(error);
 	if (retryAfterMs !== null) {
-		return Math.min(Math.max(retryAfterMs, AUTO_SYNC_FAILURE_BASE_BACKOFF_MS), AUTO_SYNC_FAILURE_MAX_BACKOFF_MS);
+		return Math.min(
+			Math.max(retryAfterMs, AUTO_SYNC_FAILURE_BASE_BACKOFF_MS),
+			AUTO_SYNC_FAILURE_MAX_BACKOFF_MS,
+		);
 	}
 	return Math.min(
 		AUTO_SYNC_FAILURE_BASE_BACKOFF_MS * Math.pow(2, Math.max(0, failureCount - 1)),

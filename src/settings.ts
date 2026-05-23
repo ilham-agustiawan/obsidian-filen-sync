@@ -1,7 +1,9 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import type { App} from "obsidian";
+import { PluginSettingTab, Setting } from "obsidian";
 import { readActivityLogs, type ActivityLogEntry } from "./activity-logs";
 import type FilenSyncPlugin from "./main";
 import { DEFAULT_IGNORE_PATTERNS, normalizeIgnorePatterns } from "./path-filters";
+import { PluginSecrets } from "./secrets";
 
 export type SyncedFileRecord = {
 	path: string;
@@ -41,7 +43,7 @@ export type FilenSyncSettings = {
 	deviceId: string;
 	vaultName: string;
 	ignorePatterns: string[];
-	auth: FilenAuth | null;
+	hasAuth: boolean;
 	syncOnSave: boolean;
 	syncOnSaveDelaySeconds: number;
 	syncIntervalMinutes: number;
@@ -58,7 +60,7 @@ export const DEFAULT_SETTINGS: FilenSyncSettings = {
 	deviceId: "",
 	vaultName: "default",
 	ignorePatterns: [...DEFAULT_IGNORE_PATTERNS],
-	auth: null,
+	hasAuth: false,
 	syncOnSave: true,
 	syncOnSaveDelaySeconds: 5,
 	syncIntervalMinutes: 3,
@@ -93,7 +95,7 @@ const readAuthVersion = (value: unknown): 1 | 2 | 3 | null => {
 	return null;
 };
 
-const readFilenAuth = (value: unknown): FilenAuth | null => {
+export const readFilenAuth = (value: unknown): FilenAuth | null => {
 	if (!isRecord(value)) {
 		return null;
 	}
@@ -151,15 +153,21 @@ export const FilenSyncSettings = {
 				"ignorePatterns" in value
 					? normalizeIgnorePatterns(readStringArray(value.ignorePatterns))
 					: [...DEFAULT_SETTINGS.ignorePatterns],
-			auth: readFilenAuth(value.auth),
+			hasAuth: readBoolean(value.hasAuth, DEFAULT_SETTINGS.hasAuth),
 			syncOnSave: readBoolean(value.syncOnSave, DEFAULT_SETTINGS.syncOnSave),
 			syncOnSaveDelaySeconds: clampNumber(
 				readNumber(value.syncOnSaveDelaySeconds, DEFAULT_SETTINGS.syncOnSaveDelaySeconds),
 				5,
 				30,
 			),
-			syncIntervalMinutes: readNumber(value.syncIntervalMinutes, DEFAULT_SETTINGS.syncIntervalMinutes),
-			syncStartupDelaySeconds: readNumber(value.syncStartupDelaySeconds, DEFAULT_SETTINGS.syncStartupDelaySeconds),
+			syncIntervalMinutes: readNumber(
+				value.syncIntervalMinutes,
+				DEFAULT_SETTINGS.syncIntervalMinutes,
+			),
+			syncStartupDelaySeconds: readNumber(
+				value.syncStartupDelaySeconds,
+				DEFAULT_SETTINGS.syncStartupDelaySeconds,
+			),
 			syncPaused: readBoolean(value.syncPaused, DEFAULT_SETTINGS.syncPaused),
 			activityLogs: readActivityLogs(value.activityLogs),
 		};
@@ -177,7 +185,10 @@ export const getVaultRemoteRoot = (remoteRoot: string, vaultName: string): strin
 };
 
 export class FilenSyncSettingTab extends PluginSettingTab {
-	constructor(app: App, private readonly plugin: FilenSyncPlugin) {
+	constructor(
+		app: App,
+		private readonly plugin: FilenSyncPlugin,
+	) {
 		super(app, plugin);
 	}
 
@@ -245,7 +256,7 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.addText((text) =>
 				text
 					// eslint-disable-next-line obsidianmd/ui/sentence-case
-				.setPlaceholder("name@example.com")
+					.setPlaceholder("name@example.com")
 					.setValue(this.plugin.settings.email)
 					.onChange(async (value) => {
 						this.plugin.settings.email = value.trim();
@@ -258,11 +269,18 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.setDesc("Not stored.")
 			.addText((text) => {
 				text.inputEl.type = "password";
-				text
-					.setPlaceholder(this.plugin.hasSessionPassword() ? "••••••••" : "Password")
-					.onChange((value) => {
-						this.plugin.setSessionPassword(value);
-					});
+				if (!this.plugin.hasSessionPassword()) {
+					const stored = new PluginSecrets(this.plugin.app).getPassword();
+					if (stored.length > 0) {
+						text.setValue(stored);
+						this.plugin.setSessionPassword(stored);
+					}
+				}
+				text.setPlaceholder(
+					this.plugin.hasSessionPassword() ? "••••••••" : "Password",
+				).onChange((value) => {
+					this.plugin.setSessionPassword(value);
+				});
 			});
 
 		new Setting(section)
@@ -330,11 +348,12 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.setName("Ignore paths")
 			.setDesc("One path or glob per line.")
 			.addTextArea((text) => {
-				text
-					.setPlaceholder(DEFAULT_IGNORE_PATTERNS.join("\n"))
+				text.setPlaceholder(DEFAULT_IGNORE_PATTERNS.join("\n"))
 					.setValue(this.plugin.settings.ignorePatterns.join("\n"))
 					.onChange(async (value) => {
-						this.plugin.settings.ignorePatterns = normalizeIgnorePatterns(value.split(/\r?\n/u));
+						this.plugin.settings.ignorePatterns = normalizeIgnorePatterns(
+							value.split(/\r?\n/u),
+						);
 						await this.plugin.saveSettings();
 					});
 				text.inputEl.rows = 4;
@@ -343,7 +362,9 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		const note = section.createDiv({ cls: "filen-sync-settings-note" });
 		note.createEl("strong", { text: "Effective remote folder" });
-		note.createSpan({ text: ` ${getVaultRemoteRoot(this.plugin.settings.remoteRoot, this.plugin.settings.vaultName)}` });
+		note.createSpan({
+			text: ` ${getVaultRemoteRoot(this.plugin.settings.remoteRoot, this.plugin.settings.vaultName)}`,
+		});
 
 		const conflictNote = section.createDiv({ cls: "filen-sync-settings-note" });
 		conflictNote.createEl("strong", { text: "Conflict handling" });
@@ -402,7 +423,9 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 
 		const intervalSetting = new Setting(section);
 		intervalSetting
-			.setName(`Background sync interval (${formatInterval(this.plugin.settings.syncIntervalMinutes)})`)
+			.setName(
+				`Background sync interval (${formatInterval(this.plugin.settings.syncIntervalMinutes)})`,
+			)
 			.setDesc("Set 0 to disable.")
 			.addSlider((slider) =>
 				slider
@@ -410,7 +433,9 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.syncIntervalMinutes)
 					.setDynamicTooltip()
 					.onChange(async (value) => {
-						intervalSetting.setName(`Background sync interval (${formatInterval(value)})`);
+						intervalSetting.setName(
+							`Background sync interval (${formatInterval(value)})`,
+						);
 						this.plugin.settings.syncIntervalMinutes = value;
 						await this.plugin.saveSettings();
 						this.plugin.refreshAutoSync();
@@ -421,23 +446,22 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.setName("Sync after startup")
 			.setDesc("Set 0 to disable.")
 			.addText((text) =>
-				text.setPlaceholder("0").setValue(String(this.plugin.settings.syncStartupDelaySeconds)).onChange(async (value) => {
-					const parsed = Number.parseInt(value, 10);
-					if (Number.isFinite(parsed) && parsed >= 0) {
-						this.plugin.settings.syncStartupDelaySeconds = parsed;
-						await this.plugin.saveSettings();
-						this.plugin.refreshAutoSync();
-					}
-				}),
+				text
+					.setPlaceholder("0")
+					.setValue(String(this.plugin.settings.syncStartupDelaySeconds))
+					.onChange(async (value) => {
+						const parsed = Number.parseInt(value, 10);
+						if (Number.isFinite(parsed) && parsed >= 0) {
+							this.plugin.settings.syncStartupDelaySeconds = parsed;
+							await this.plugin.saveSettings();
+							this.plugin.refreshAutoSync();
+						}
+					}),
 			);
 	}
 
 	private renderActionsSection(containerEl: HTMLElement): void {
-		const section = createSection(
-			containerEl,
-			"Actions",
-			"Run manual tasks.",
-		);
+		const section = createSection(containerEl, "Actions", "Run manual tasks.");
 
 		new Setting(section)
 			.setName("Test connection")
@@ -452,15 +476,21 @@ export class FilenSyncSettingTab extends PluginSettingTab {
 			.setName("Sync now")
 			.setDesc("Run bidirectional sync.")
 			.addButton((button) =>
-				button.setButtonText("Sync").setCta().onClick(() => {
-					void this.plugin.syncNow();
-				}),
+				button
+					.setButtonText("Sync")
+					.setCta()
+					.onClick(() => {
+						void this.plugin.syncNow();
+					}),
 			);
 	}
-
 }
 
-const createSection = (containerEl: HTMLElement, title: string, description: string): HTMLElement => {
+const createSection = (
+	containerEl: HTMLElement,
+	title: string,
+	description: string,
+): HTMLElement => {
 	const section = containerEl.createDiv({ cls: "filen-sync-settings-section" });
 	section.createDiv({ text: title, cls: "filen-sync-settings-section-title" });
 	section.createEl("p", { text: description, cls: "filen-sync-settings-section-description" });
