@@ -1,0 +1,21 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "import", "unicorn"],
+	"env": {
+		"browser": true
+	},
+	"globals": {
+		"NodeJS": "readonly"
+	},
+	"ignorePatterns": ["node_modules", "dist", "tmp", "main.js", "*.mjs", "*.cjs"],
+	"rules": {
+		"eqeqeq": "warn",
+		"no-var": "error",
+		"prefer-const": "error",
+		"no-debugger": "warn",
+		"no-console": "off",
+		"typescript/no-explicit-any": "off",
+		"typescript/consistent-type-imports": "warn",
+		"unicorn/filename-case": "off"
+	}
+}
