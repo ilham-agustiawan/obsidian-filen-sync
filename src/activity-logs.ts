@@ -1,4 +1,5 @@
-import { App, Modal, Notice } from "obsidian";
+import type { App} from "obsidian";
+import { Modal, Notice } from "obsidian";
 
 export const MAX_ACTIVITY_LOG_ENTRIES = 500;
 
@@ -43,10 +44,34 @@ export const trimActivityLogs = (entries: ActivityLogEntry[]): ActivityLogEntry[
 export const inferActivityLogKind = (message: string): ActivityLogKind => {
 	const lower = message.toLowerCase();
 	if (lower.includes("conflict")) return "conflict";
-	if (lower.includes("skipped") || lower.includes("ignored") || lower.includes("need deletion confirmation")) return "skipped";
-	if (lower.includes("not logged in") || lower.includes("auth") || lower.includes("password missing") || lower.includes("email missing") || lower.includes("account")) return "account";
-	if (lower.includes("network") || lower.includes("timeout") || lower.includes("unable to connect") || lower.includes("disconnected from server")) return "network";
-	if (lower.includes("failed") || lower.includes("error") || lower.includes("unable to") || lower.includes("out of memory")) return "error";
+	if (
+		lower.includes("skipped") ||
+		lower.includes("ignored") ||
+		lower.includes("need deletion confirmation")
+	)
+		return "skipped";
+	if (
+		lower.includes("not logged in") ||
+		lower.includes("auth") ||
+		lower.includes("password missing") ||
+		lower.includes("email missing") ||
+		lower.includes("account")
+	)
+		return "account";
+	if (
+		lower.includes("network") ||
+		lower.includes("timeout") ||
+		lower.includes("unable to connect") ||
+		lower.includes("disconnected from server")
+	)
+		return "network";
+	if (
+		lower.includes("failed") ||
+		lower.includes("error") ||
+		lower.includes("unable to") ||
+		lower.includes("out of memory")
+	)
+		return "error";
 	return "general";
 };
 
@@ -54,7 +79,10 @@ export class ActivityLogModal extends Modal {
 	private unsubscribe: (() => void) | null = null;
 	private listEl: HTMLElement | null = null;
 
-	constructor(app: App, private readonly host: ActivityLogHost) {
+	constructor(
+		app: App,
+		private readonly host: ActivityLogHost,
+	) {
 		super(app);
 	}
 
@@ -69,11 +97,15 @@ export class ActivityLogModal extends Modal {
 
 		const actions = this.contentEl.createDiv({ cls: "filen-sync-activity-log-actions" });
 		const copyButton = actions.createEl("button", { text: "Copy logs" });
-		copyButton.addEventListener("click", () => { void this.copyLogs(); });
+		copyButton.addEventListener("click", () => {
+			void this.copyLogs();
+		});
 
 		const clearButton = actions.createEl("button", { text: "Clear logs" });
 		clearButton.addClass("mod-warning");
-		clearButton.addEventListener("click", () => { void this.clearLogs(); });
+		clearButton.addEventListener("click", () => {
+			void this.clearLogs();
+		});
 
 		this.listEl = this.contentEl.createDiv({ cls: "filen-sync-activity-log-list" });
 		this.renderLogs();
@@ -92,12 +124,18 @@ export class ActivityLogModal extends Modal {
 		this.listEl.empty();
 		const logs = [...this.host.getActivityLogs()].reverse();
 		if (logs.length === 0) {
-			this.listEl.createDiv({ cls: "filen-sync-activity-log-empty", text: "No activity yet." });
+			this.listEl.createDiv({
+				cls: "filen-sync-activity-log-empty",
+				text: "No activity yet.",
+			});
 			return;
 		}
 
 		for (const entry of logs) {
-			this.listEl.createDiv({ cls: "filen-sync-activity-log-line", text: formatActivityLogEntry(entry) });
+			this.listEl.createDiv({
+				cls: "filen-sync-activity-log-line",
+				text: formatActivityLogEntry(entry),
+			});
 		}
 	}
 
@@ -118,18 +156,28 @@ export class ActivityLogModal extends Modal {
 	}
 
 	private clearLogs(): void {
-		void confirmAction(this.app, "Clear activity logs?",
-			"This removes recent sync activity from plugin settings.", "Clear logs")
-			.then(async (confirmed) => {
-				if (!confirmed) return;
-				await this.host.clearActivityLogs();
-				new Notice("Activity logs cleared.");
-			});
+		void confirmAction(
+			this.app,
+			"Clear activity logs?",
+			"This removes recent sync activity from plugin settings.",
+			"Clear logs",
+		).then(async (confirmed) => {
+			if (!confirmed) return;
+			await this.host.clearActivityLogs();
+			new Notice("Activity logs cleared.");
+		});
 	}
 }
 
-const confirmAction = (app: App, title: string, message: string, confirmText: string): Promise<boolean> =>
-	new Promise((resolve) => { new ConfirmModal(app, title, message, confirmText, resolve).open(); });
+const confirmAction = (
+	app: App,
+	title: string,
+	message: string,
+	confirmText: string,
+): Promise<boolean> =>
+	new Promise((resolve) => {
+		new ConfirmModal(app, title, message, confirmText, resolve).open();
+	});
 
 class ConfirmModal extends Modal {
 	private resolved = false;
@@ -149,10 +197,14 @@ class ConfirmModal extends Modal {
 		this.contentEl.createEl("p", { text: this.message });
 		const btns = this.contentEl.createDiv({ cls: "modal-button-container" });
 		const cancel = btns.createEl("button", { text: "Cancel" });
-		cancel.addEventListener("click", () => { this.finish(false); });
+		cancel.addEventListener("click", () => {
+			this.finish(false);
+		});
 		const confirm = btns.createEl("button", { text: this.confirmText });
 		confirm.addClass("mod-warning");
-		confirm.addEventListener("click", () => { this.finish(true); });
+		confirm.addEventListener("click", () => {
+			this.finish(true);
+		});
 	}
 
 	onClose(): void {
@@ -181,7 +233,14 @@ const readActivityLogEntry = (value: unknown): ActivityLogEntry | null => {
 };
 
 const readActivityLogKind = (value: unknown, message: string): ActivityLogKind => {
-	if (value === "general" || value === "error" || value === "skipped" || value === "conflict" || value === "account" || value === "network") {
+	if (
+		value === "general" ||
+		value === "error" ||
+		value === "skipped" ||
+		value === "conflict" ||
+		value === "account" ||
+		value === "network"
+	) {
 		return value;
 	}
 	return inferActivityLogKind(message);

@@ -26,14 +26,18 @@ export class FilenSyncSetupModal extends Modal {
 		steps.createEl("li", { text: "Open plugin settings" });
 		// eslint-disable-next-line obsidianmd/ui/sentence-case
 		steps.createEl("li", { text: "Enter your Filen email, password, and optional 2FA code" });
-		steps.createEl("li", { text: "Keep the default remote folder or choose one dedicated to this vault" });
+		steps.createEl("li", {
+			text: "Keep the default remote folder or choose one dedicated to this vault",
+		});
 		// eslint-disable-next-line obsidianmd/ui/sentence-case
 		steps.createEl("li", { text: "Click Login to authenticate" });
 		steps.createEl("li", { text: "Run sync now to create the mirror" });
 
 		const note = this.contentEl.createDiv({ cls: "filen-sync-setup-note" });
 		note.createEl("strong", { text: "Privacy" });
-		note.createSpan({ text: " Your password and 2FA code stay in memory for this session only." });
+		note.createSpan({
+			text: " Your password and 2FA code stay in memory for this session only.",
+		});
 
 		const actions = this.contentEl.createDiv({ cls: "modal-button-container" });
 		const later = actions.createEl("button", { text: "Later" });

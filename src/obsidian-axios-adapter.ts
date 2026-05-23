@@ -46,13 +46,14 @@ async function doRequest(
 	// does NOT include Content-Type — real axios adds it from defaults. We add it below.
 	const headers: Record<string, string> = {};
 	if (config.headers) {
-		for (const [k, v] of Object.entries(config.headers)) {
+		for (const k of Object.keys(config.headers)) {
+			const v = config.headers[k];
 			if (typeof v === "string") headers[k] = v;
 		}
 	}
 
 	let body: ArrayBuffer | undefined;
-	if (data != null) {
+	if (data !== null) {
 		if (data instanceof ArrayBuffer) {
 			body = data;
 		} else if (ArrayBuffer.isView(data)) {
@@ -67,7 +68,7 @@ async function doRequest(
 			body = enc.buffer.slice(enc.byteOffset, enc.byteOffset + enc.byteLength);
 			// Real axios injects Content-Type: application/json from its POST defaults.
 			// Replicate that here so the server can parse the body correctly.
-			if (!Object.keys(headers).some(k => k.toLowerCase() === "content-type")) {
+			if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) {
 				headers["Content-Type"] = "application/json";
 			}
 		}
@@ -76,11 +77,17 @@ async function doRequest(
 	// requestUrl goes through Electron's main-process net module, which uses
 	// the OS certificate store. This bypasses ERR_CERT_AUTHORITY_INVALID that
 	// occurs when XHR/fetch in the renderer cannot validate gateway.filen.net.
-	const res = await requestUrl({ url, method: method.toUpperCase(), headers, body, throw: false });
+	const res = await requestUrl({
+		url,
+		method: method.toUpperCase(),
+		headers,
+		body,
+		throw: false,
+	});
 
 	const rt = config.responseType ?? "json";
 	const responseData: unknown =
-		rt === "arraybuffer" || rt === "stream" ? res.arrayBuffer : res.json ?? res.text;
+		rt === "arraybuffer" || rt === "stream" ? res.arrayBuffer : (res.json ?? res.text);
 
 	return {
 		data: responseData,

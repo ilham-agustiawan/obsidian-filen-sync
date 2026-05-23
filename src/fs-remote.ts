@@ -56,7 +56,10 @@ export class FilenRemoteFs implements RemoteFs {
 		}
 	}
 
-	private async walkTree(rootUuid: string, cloud: ReturnType<FilenSDK["cloud"]>): Promise<RemoteEntry[]> {
+	private async walkTree(
+		rootUuid: string,
+		cloud: ReturnType<FilenSDK["cloud"]>,
+	): Promise<RemoteEntry[]> {
 		const tree = await cloud.getDirectoryTree({ uuid: rootUuid, skipCache: true });
 		const entries: RemoteEntry[] = [];
 
@@ -81,7 +84,10 @@ export class FilenRemoteFs implements RemoteFs {
 		return entries;
 	}
 
-	private async walkRecursive(rootUuid: string, cloud: ReturnType<FilenSDK["cloud"]>): Promise<RemoteEntry[]> {
+	private async walkRecursive(
+		rootUuid: string,
+		cloud: ReturnType<FilenSDK["cloud"]>,
+	): Promise<RemoteEntry[]> {
 		const visited = new Set<string>([rootUuid]);
 
 		// Cap concurrent listDirectory calls to avoid hitting API rate limits.
@@ -89,12 +95,19 @@ export class FilenRemoteFs implements RemoteFs {
 		let active = 0;
 		const waitQueue: Array<() => void> = [];
 		const acquire = (): Promise<void> => {
-			if (active < MAX_CONCURRENT) { active++; return Promise.resolve(); }
-			return new Promise(resolve => waitQueue.push(resolve));
+			if (active < MAX_CONCURRENT) {
+				active++;
+				return Promise.resolve();
+			}
+			return new Promise((resolve) => waitQueue.push(resolve));
 		};
 		const release = (): void => {
 			const next = waitQueue.shift();
-			if (next) { next(); } else { active--; }
+			if (next) {
+				next();
+			} else {
+				active--;
+			}
 		};
 
 		const walkDir = async (uuid: string, pathPrefix: string): Promise<RemoteEntry[]> => {
@@ -143,7 +156,9 @@ export class FilenRemoteFs implements RemoteFs {
 	async writeFile(path: string, bytes: Uint8Array, mtime: number, _ctime: number): Promise<void> {
 		const client = await this.getClient();
 		const normalized = normalizeRemotePath(path);
-		const parent = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
+		const parent = normalized.includes("/")
+			? normalized.slice(0, normalized.lastIndexOf("/"))
+			: "";
 		const fileName = normalized.slice(normalized.lastIndexOf("/") + 1);
 
 		const parentUuid = await this.getParentUuid(parent);
@@ -222,17 +237,25 @@ export class FilenRemoteFs implements RemoteFs {
 		for (;;) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			if (value !== undefined) { buffers.push(value); total += value.byteLength; }
+			if (value !== undefined) {
+				buffers.push(value);
+				total += value.byteLength;
+			}
 		}
 		const out = new Uint8Array(total);
 		let offset = 0;
-		for (const buf of buffers) { out.set(buf, offset); offset += buf.byteLength; }
+		for (const buf of buffers) {
+			out.set(buf, offset);
+			offset += buf.byteLength;
+		}
 		return out;
 	}
 
 	async restoreFileVersion(path: string, versionUuid: string): Promise<void> {
 		const client = await this.getClient();
-		const currentUuid = await client.fs().pathToItemUUID({ path: this.join(path), type: "file" });
+		const currentUuid = await client
+			.fs()
+			.pathToItemUUID({ path: this.join(path), type: "file" });
 		if (currentUuid === null) {
 			throw new Error("Remote file missing. Sync the file first, then try restore again.");
 		}
@@ -257,7 +280,7 @@ export class FilenRemoteFs implements RemoteFs {
 			{
 				metadataCache: true,
 				connectToSocket: false,
-				...(this.config.auth ?? {}),
+				...this.config.auth,
 			},
 			undefined,
 			// Route all SDK HTTP requests through Obsidian's requestUrl (Electron
@@ -294,7 +317,9 @@ export class FilenRemoteFs implements RemoteFs {
 
 	private join(path: string): string {
 		const normalized = normalizeRemotePath(path);
-		return normalized.length === 0 ? this.root : `${this.root.replace(/\/+$/, "")}/${normalized}`;
+		return normalized.length === 0
+			? this.root
+			: `${this.root.replace(/\/+$/, "")}/${normalized}`;
 	}
 
 	private async getParentUuid(path: string): Promise<string> {

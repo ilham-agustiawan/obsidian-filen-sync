@@ -44,7 +44,9 @@ export const normalizeIgnorePatterns = (patterns: Iterable<string>): string[] =>
 };
 
 export const createSyncPathFilter = (config: PathFilterConfig): SyncPathFilter => {
-	const builtInPatterns = normalizeIgnorePatterns([`${config.configDir}/plugins/${config.pluginId}`]);
+	const builtInPatterns = normalizeIgnorePatterns([
+		`${config.configDir}/plugins/${config.pluginId}`,
+	]);
 	const patterns = normalizeIgnorePatterns([...builtInPatterns, ...config.ignorePatterns]);
 	const rules = patterns.map(compileIgnoreRule);
 
@@ -67,7 +69,8 @@ export const createSyncPathFilter = (config: PathFilterConfig): SyncPathFilter =
 	};
 };
 
-const normalizePattern = (value: string): string => normalizePath(value).replace(/^\/+/, "").replace(/\/+$/, "");
+const normalizePattern = (value: string): string =>
+	normalizePath(value).replace(/^\/+/, "").replace(/\/+$/, "");
 
 const compileIgnoreRule = (pattern: string): CompiledIgnoreRule => {
 	if (!hasWildcards(pattern)) {

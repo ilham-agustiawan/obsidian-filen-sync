@@ -5,7 +5,9 @@
 	cursor: pointer;
 	border-radius: 999px;
 	padding-inline: 6px;
-	transition: background-color 120ms ease, color 120ms ease;
+	transition:
+		background-color 120ms ease,
+		color 120ms ease;
 }
 
 .filen-sync-status-item:hover {
@@ -63,7 +65,11 @@
 	padding: 16px 18px;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 14px;
-	background: linear-gradient(180deg, color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary)) 0%, var(--background-primary) 100%);
+	background: linear-gradient(
+		180deg,
+		color-mix(in srgb, var(--interactive-accent) 10%, var(--background-primary)) 0%,
+		var(--background-primary) 100%
+	);
 }
 
 .filen-sync-settings-hero-title {
@@ -482,7 +488,11 @@
 }
 
 .filen-sync-activity-row.is-active {
-	border-color: color-mix(in srgb, var(--interactive-accent) 40%, var(--background-modifier-border));
+	border-color: color-mix(
+		in srgb,
+		var(--interactive-accent) 40%,
+		var(--background-modifier-border)
+	);
 	background: color-mix(in srgb, var(--interactive-accent) 8%, var(--background-secondary));
 }
 
@@ -719,7 +729,6 @@
 	white-space: nowrap;
 	cursor: pointer;
 }
-
 
 .filen-sync-version-content {
 	flex: 1;
@@ -1050,11 +1059,19 @@
 	height: 22px;
 }
 
-.filen-sync-plan-icon.upload { color: var(--text-accent); }
-.filen-sync-plan-icon.download { color: var(--text-success); }
+.filen-sync-plan-icon.upload {
+	color: var(--text-accent);
+}
+.filen-sync-plan-icon.download {
+	color: var(--text-success);
+}
 .filen-sync-plan-icon.delete-local,
-.filen-sync-plan-icon.delete-remote { color: var(--text-warning); }
-.filen-sync-plan-icon.conflict { color: var(--text-error); }
+.filen-sync-plan-icon.delete-remote {
+	color: var(--text-warning);
+}
+.filen-sync-plan-icon.conflict {
+	color: var(--text-error);
+}
 
 .filen-sync-plan-path {
 	font-family: var(--font-monospace);

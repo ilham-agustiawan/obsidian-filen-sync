@@ -28,13 +28,13 @@ type ModalState =
 	| { kind: "loading-versions" }
 	| { kind: "error-versions"; message: string }
 	| {
-		kind: "ready";
-		groups: VersionGroup[];
-		selected: RemoteFileVersion | null;
-		preview: PreviewState;
-		showDiff: boolean;
-		restoring: boolean;
-		mobileView: "list" | "preview";
+			kind: "ready";
+			groups: VersionGroup[];
+			selected: RemoteFileVersion | null;
+			preview: PreviewState;
+			showDiff: boolean;
+			restoring: boolean;
+			mobileView: "list" | "preview";
 	  };
 
 export class FileVersionModal extends Modal {
@@ -100,7 +100,10 @@ export class FileVersionModal extends Modal {
 		this.previewEl = null;
 
 		if (this.state.kind === "loading-versions") {
-			this.contentEl.createDiv({ cls: "filen-sync-version-loading", text: "Loading versions…" });
+			this.contentEl.createDiv({
+				cls: "filen-sync-version-loading",
+				text: "Loading versions…",
+			});
 			return;
 		}
 
@@ -129,9 +132,15 @@ export class FileVersionModal extends Modal {
 		}
 	}
 
-	private renderSidebar(container: HTMLElement, state: Extract<ModalState, { kind: "ready" }>): void {
+	private renderSidebar(
+		container: HTMLElement,
+		state: Extract<ModalState, { kind: "ready" }>,
+	): void {
 		if (state.groups.length === 0) {
-			container.createDiv({ cls: "filen-sync-version-empty", text: "No previous versions found." });
+			container.createDiv({
+				cls: "filen-sync-version-empty",
+				text: "No previous versions found.",
+			});
 			return;
 		}
 
@@ -139,7 +148,10 @@ export class FileVersionModal extends Modal {
 			const groupEl = container.createDiv({ cls: "filen-sync-version-group" });
 
 			const header = groupEl.createDiv({ cls: "filen-sync-version-date-header" });
-			const arrow = header.createSpan({ cls: "filen-sync-version-arrow", text: group.expanded ? "▾" : "▸" });
+			const arrow = header.createSpan({
+				cls: "filen-sync-version-arrow",
+				text: group.expanded ? "▾" : "▸",
+			});
 			header.createSpan({ text: group.dateLabel, cls: "filen-sync-version-date-label" });
 			header.createSpan({
 				text: ` · ${group.versions.length} revision${group.versions.length === 1 ? "" : "s"}`,
@@ -157,7 +169,9 @@ export class FileVersionModal extends Modal {
 
 			for (const version of group.versions) {
 				const isSelected = state.selected?.uuid === version.uuid;
-				const row = rowsEl.createDiv({ cls: `filen-sync-version-row${isSelected ? " is-selected" : ""}` });
+				const row = rowsEl.createDiv({
+					cls: `filen-sync-version-row${isSelected ? " is-selected" : ""}`,
+				});
 				row.setAttr("data-uuid", version.uuid);
 				row.setText(formatTime(version.timestamp));
 				row.addEventListener("click", () => {
@@ -170,12 +184,18 @@ export class FileVersionModal extends Modal {
 		}
 	}
 
-	private renderPreviewPanel(container: HTMLElement, state: Extract<ModalState, { kind: "ready" }>): void {
+	private renderPreviewPanel(
+		container: HTMLElement,
+		state: Extract<ModalState, { kind: "ready" }>,
+	): void {
 		const header = container.createDiv({ cls: "filen-sync-version-header" });
 
 		if (Platform.isMobile) {
 			// eslint-disable-next-line obsidianmd/ui/sentence-case
-		const backBtn = header.createEl("button", { text: "← Back", cls: "filen-sync-version-back" });
+			const backBtn = header.createEl("button", {
+				text: "← Back",
+				cls: "filen-sync-version-back",
+			});
 			backBtn.addEventListener("click", () => {
 				state.mobileView = "list";
 				this.render();
@@ -195,14 +215,18 @@ export class FileVersionModal extends Modal {
 		});
 
 		const copyBtn = header.createEl("button", { text: "Copy", cls: "filen-sync-version-copy" });
-		copyBtn.addEventListener("click", () => { void this.copyContent(state); });
+		copyBtn.addEventListener("click", () => {
+			void this.copyContent(state);
+		});
 
 		const restoreBtn = header.createEl("button", {
 			text: state.restoring ? "Restoring…" : "Restore",
 			cls: "mod-cta filen-sync-version-restore",
 		});
 		restoreBtn.disabled = state.restoring || state.selected === null;
-		restoreBtn.addEventListener("click", () => { void this.restore(state); });
+		restoreBtn.addEventListener("click", () => {
+			void this.restore(state);
+		});
 
 		this.previewEl = container.createDiv({ cls: "filen-sync-version-content" });
 		this.renderPreviewContent(state);
@@ -216,7 +240,10 @@ export class FileVersionModal extends Modal {
 		const { preview, showDiff, selected } = state;
 
 		if (selected === null || preview.kind === "idle") {
-			el.createDiv({ cls: "filen-sync-version-placeholder", text: "Select a version to preview." });
+			el.createDiv({
+				cls: "filen-sync-version-placeholder",
+				text: "Select a version to preview.",
+			});
 			return;
 		}
 
@@ -226,12 +253,18 @@ export class FileVersionModal extends Modal {
 		}
 
 		if (preview.kind === "binary") {
-			el.createDiv({ cls: "filen-sync-version-placeholder", text: "Binary file — cannot preview." });
+			el.createDiv({
+				cls: "filen-sync-version-placeholder",
+				text: "Binary file — cannot preview.",
+			});
 			return;
 		}
 
 		if (preview.kind === "error") {
-			el.createDiv({ cls: "filen-sync-version-error-inline", text: `Preview failed: ${preview.message}` });
+			el.createDiv({
+				cls: "filen-sync-version-error-inline",
+				text: `Preview failed: ${preview.message}`,
+			});
 			return;
 		}
 
@@ -240,7 +273,8 @@ export class FileVersionModal extends Modal {
 			for (const line of diff) {
 				const lineEl = el.createDiv({ text: line.text || " " });
 				if (line.kind === "added") lineEl.addClass("filen-sync-version-diff-added");
-				else if (line.kind === "removed") lineEl.addClass("filen-sync-version-diff-removed");
+				else if (line.kind === "removed")
+					lineEl.addClass("filen-sync-version-diff-removed");
 			}
 		} else {
 			el.setText(preview.text);
@@ -256,12 +290,16 @@ export class FileVersionModal extends Modal {
 
 		// Update sidebar selection highlight in-place (desktop only)
 		if (!Platform.isMobile) {
-			for (const row of Array.from(this.contentEl.querySelectorAll<HTMLElement>(".filen-sync-version-row"))) {
+			for (const row of Array.from(
+				this.contentEl.querySelectorAll<HTMLElement>(".filen-sync-version-row"),
+			)) {
 				if (row.getAttr("data-uuid") === version.uuid) row.addClass("is-selected");
 				else row.removeClass("is-selected");
 			}
 			// Update restore button disabled state
-			const restoreBtn = this.contentEl.querySelector<HTMLButtonElement>(".filen-sync-version-restore");
+			const restoreBtn = this.contentEl.querySelector<HTMLButtonElement>(
+				".filen-sync-version-restore",
+			);
 			if (restoreBtn !== null) restoreBtn.disabled = false;
 		} else if (state.mobileView === "preview") {
 			this.render();
@@ -306,7 +344,9 @@ export class FileVersionModal extends Modal {
 				new Notice(`Restored version from ${formatTime(version.timestamp)}`);
 			} catch (syncError) {
 				const msg = syncError instanceof Error ? syncError.message : "Unknown error";
-				new Notice(`Version restored on Filen, but local sync failed: ${msg}. Run Sync now.`);
+				new Notice(
+					`Version restored on Filen, but local sync failed: ${msg}. Run Sync now.`,
+				);
 			}
 			this.close();
 		} catch (error) {
@@ -351,14 +391,26 @@ const groupByDate = (versions: RemoteFileVersion[]): VersionGroup[] => {
 	for (const v of versions) {
 		const label = formatDate(v.timestamp);
 		let g = groups.get(label);
-		if (g === undefined) { g = []; groups.set(label, g); }
+		if (g === undefined) {
+			g = [];
+			groups.set(label, g);
+		}
 		g.push(v);
 	}
-	return [...groups.entries()].map(([dateLabel, vs]) => ({ dateLabel, versions: vs, expanded: false }));
+	return [...groups.entries()].map(([dateLabel, vs]) => ({
+		dateLabel,
+		versions: vs,
+		expanded: false,
+	}));
 };
 
 const formatDate = (epochMs: number): string =>
-	new Date(epochMs).toLocaleDateString([], { weekday: "short", year: "numeric", month: "short", day: "numeric" });
+	new Date(epochMs).toLocaleDateString([], {
+		weekday: "short",
+		year: "numeric",
+		month: "short",
+		day: "numeric",
+	});
 
 const formatTime = (epochMs: number): string =>
 	new Date(epochMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -376,9 +428,8 @@ const computeDiff = (oldText: string, newText: string): DiffLine[] => {
 
 	for (let i = 1; i <= m; i++) {
 		for (let j = 1; j <= n; j++) {
-			dp[i * (n + 1) + j] = a[i - 1] === b[j - 1]
-				? at(i - 1, j - 1) + 1
-				: Math.max(at(i - 1, j), at(i, j - 1));
+			dp[i * (n + 1) + j] =
+				a[i - 1] === b[j - 1] ? at(i - 1, j - 1) + 1 : Math.max(at(i - 1, j), at(i, j - 1));
 		}
 	}
 
@@ -391,7 +442,8 @@ const computeDiff = (oldText: string, newText: string): DiffLine[] => {
 		const bLine = b[j - 1];
 		if (i > 0 && j > 0 && aLine === bLine && at(i, j) === at(i - 1, j - 1) + 1) {
 			result.push({ kind: "unchanged", text: aLine ?? "" });
-			i--; j--;
+			i--;
+			j--;
 		} else if (j > 0 && (i === 0 || at(i, j - 1) >= at(i - 1, j))) {
 			result.push({ kind: "added", text: bLine ?? "" });
 			j--;
