@@ -68,14 +68,14 @@ Your password and two-factor code are kept in memory only for the current Obsidi
 
 ## Commands
 
-| Command | What it does |
-| --- | --- |
-| **Obsidian Filen Sync: Sync now** | Compare local and remote changes, update both sides, and keep conflict copies when needed. |
-| **Obsidian Filen Sync: Push changed local files** | Upload local changes to Filen without pulling remote changes. |
-| **Obsidian Filen Sync: Pull changed remote files** | Download remote changes without pushing local changes. |
-| **Obsidian Filen Sync: Test Filen connection** | Check login and remote write/delete access. |
-| **Obsidian Filen Sync: Open sync activity** | Open the sync activity view for the current or last run. |
-| **Obsidian Filen Sync: Toggle sync on save** | Enable or disable save-triggered background sync. |
+| Command                                            | What it does                                                                               |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| **Obsidian Filen Sync: Sync now**                  | Compare local and remote changes, update both sides, and keep conflict copies when needed. |
+| **Obsidian Filen Sync: Push changed local files**  | Upload local changes to Filen without pulling remote changes.                              |
+| **Obsidian Filen Sync: Pull changed remote files** | Download remote changes without pushing local changes.                                     |
+| **Obsidian Filen Sync: Test Filen connection**     | Check login and remote write/delete access.                                                |
+| **Obsidian Filen Sync: Open sync activity**        | Open the sync activity view for the current or last run.                                   |
+| **Obsidian Filen Sync: Toggle sync on save**       | Enable or disable save-triggered background sync.                                          |
 
 ## Remote layout
 

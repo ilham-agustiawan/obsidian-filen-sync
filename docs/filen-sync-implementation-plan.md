@@ -20,30 +20,30 @@ Obsidian vault
 
 ## Main modules
 
-| Module | Responsibility |
-| --- | --- |
-| `src/main.ts` | Plugin lifecycle, commands, status bar, views, auth session |
-| `src/settings.ts` | Settings validation, saved Filen auth, settings UI |
-| `src/fs-remote.ts` | Filen SDK boundary and `RemoteFs` implementation |
-| `src/sync-engine.ts` | 3-way compare, conflict copies, push/pull/write logic |
-| `src/db.ts` | IndexedDB prev-sync records via `localforage` |
-| `src/progress-view.ts` | Sync progress workspace view |
-| `src/file-version-modal.ts` | Filen version list/restore/delete UI |
+| Module                      | Responsibility                                              |
+| --------------------------- | ----------------------------------------------------------- |
+| `src/main.ts`               | Plugin lifecycle, commands, status bar, views, auth session |
+| `src/settings.ts`           | Settings validation, saved Filen auth, settings UI          |
+| `src/fs-remote.ts`          | Filen SDK boundary and `RemoteFs` implementation            |
+| `src/sync-engine.ts`        | 3-way compare, conflict copies, push/pull/write logic       |
+| `src/db.ts`                 | IndexedDB prev-sync records via `localforage`               |
+| `src/progress-view.ts`      | Sync progress workspace view                                |
+| `src/file-version-modal.ts` | Filen version list/restore/delete UI                        |
 
 ## Remote FS interface
 
 ```ts
 type RemoteFs = {
-  walk(): Promise<RemoteEntry[]>;
-  readFile(path: string): Promise<Uint8Array>;
-  writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void>;
-  rm(path: string): Promise<void>;
-  mkdir(path: string): Promise<void>;
-  getFileVersions(path: string): Promise<RemoteFileVersion[]>;
-  restoreFileVersion(path: string, versionUuid: string): Promise<void>;
-  deleteFileVersion(versionUuid: string): Promise<void>;
-  checkConnect(): Promise<void>;
-  close(): void;
+	walk(): Promise<RemoteEntry[]>;
+	readFile(path: string): Promise<Uint8Array>;
+	writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<void>;
+	rm(path: string): Promise<void>;
+	mkdir(path: string): Promise<void>;
+	getFileVersions(path: string): Promise<RemoteFileVersion[]>;
+	restoreFileVersion(path: string, versionUuid: string): Promise<void>;
+	deleteFileVersion(versionUuid: string): Promise<void>;
+	checkConnect(): Promise<void>;
+	close(): void;
 };
 ```
 
@@ -70,11 +70,11 @@ Examples:
 
 ```ts
 type SyncedFileRecord = {
-  path: string;
-  mtime: number;
-  ctime: number;
-  size: number;
-  hash?: string;
+	path: string;
+	mtime: number;
+	ctime: number;
+	size: number;
+	hash?: string;
 };
 ```
 
@@ -111,10 +111,10 @@ note.sync-conflict-<device-id>-<timestamp>.md
 
 Delete propagation is incomplete:
 
-| Case | Expected | Current |
-| --- | --- | --- |
+| Case                              | Expected      | Current                           |
+| --------------------------------- | ------------- | --------------------------------- |
 | local missing, remote equals prev | delete remote | downloads remote in bidirectional |
-| remote missing, local equals prev | delete local | uploads local in bidirectional |
+| remote missing, local equals prev | delete local  | uploads local in bidirectional    |
 
 Track fix in `TODO.md`.
 

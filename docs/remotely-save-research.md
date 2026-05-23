@@ -16,15 +16,15 @@ LOCAL (current vault) ↔ PREV_SYNC (last synced state, in IndexedDB) ↔ REMOTE
 
 By comparing each file across all three states, the engine knows exactly what changed and where:
 
-| local vs prev | remote vs prev | Decision |
-|---|---|---|
-| same | same | no-op |
-| changed | same | push local → remote |
-| same | changed | pull remote → local |
-| missing | same | delete from remote |
-| same | missing | delete from local |
-| changed | changed | **conflict** → resolve by strategy |
-| new | new | conflict |
+| local vs prev | remote vs prev | Decision                           |
+| ------------- | -------------- | ---------------------------------- |
+| same          | same           | no-op                              |
+| changed       | same           | push local → remote                |
+| same          | changed        | pull remote → local                |
+| missing       | same           | delete from remote                 |
+| same          | missing        | delete from local                  |
+| changed       | changed        | **conflict** → resolve by strategy |
+| new           | new            | conflict                           |
 
 ---
 
@@ -34,36 +34,41 @@ Every storage backend extends this abstract class. All cloud providers and the l
 
 ```typescript
 abstract class FakeFs {
-  abstract kind: string;
+	abstract kind: string;
 
-  // List ALL files/folders recursively. Called once per sync.
-  abstract walk(): Promise<Entity[]>;
+	// List ALL files/folders recursively. Called once per sync.
+	abstract walk(): Promise<Entity[]>;
 
-  // Get metadata for a single path.
-  abstract stat(key: string): Promise<Entity>;
+	// Get metadata for a single path.
+	abstract stat(key: string): Promise<Entity>;
 
-  // Create a folder (key must end with "/").
-  abstract mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity>;
+	// Create a folder (key must end with "/").
+	abstract mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity>;
 
-  // Write binary file content with explicit timestamps.
-  abstract writeFile(key: string, content: ArrayBuffer, mtime: number, ctime: number): Promise<Entity>;
+	// Write binary file content with explicit timestamps.
+	abstract writeFile(
+		key: string,
+		content: ArrayBuffer,
+		mtime: number,
+		ctime: number,
+	): Promise<Entity>;
 
-  // Download file as raw bytes.
-  abstract readFile(key: string): Promise<ArrayBuffer>;
+	// Download file as raw bytes.
+	abstract readFile(key: string): Promise<ArrayBuffer>;
 
-  // Move/rename a file or folder.
-  abstract rename(key1: string, key2: string): Promise<void>;
+	// Move/rename a file or folder.
+	abstract rename(key1: string, key2: string): Promise<void>;
 
-  // Delete a file or folder.
-  abstract rm(key: string): Promise<void>;
+	// Delete a file or folder.
+	abstract rm(key: string): Promise<void>;
 
-  // Verify credentials work.
-  // Default impl (checkConnectCommonOps) creates/writes/reads/deletes a test file.
-  abstract checkConnect(callbackFunc?: any): Promise<boolean>;
+	// Verify credentials work.
+	// Default impl (checkConnectCommonOps) creates/writes/reads/deletes a test file.
+	abstract checkConnect(callbackFunc?: any): Promise<boolean>;
 
-  abstract getUserDisplayName(): Promise<string>;
-  abstract revokeAuth(): Promise<any>;
-  abstract allowEmptyFile(): boolean;
+	abstract getUserDisplayName(): Promise<string>;
+	abstract revokeAuth(): Promise<any>;
+	abstract allowEmptyFile(): boolean;
 }
 ```
 
@@ -83,26 +88,27 @@ Represents a single file or folder at a point in time.
 
 ```typescript
 interface Entity {
-  keyRaw: string;        // Unencrypted path (always present)
-  key?: string;          // May differ from keyRaw when encryption is on
+	keyRaw: string; // Unencrypted path (always present)
+	key?: string; // May differ from keyRaw when encryption is on
 
-  mtimeCli?: number;     // Client-side modification time (ms)
-  ctimeCli?: number;     // Client-side creation time (ms)
-  mtimeSvr?: number;     // Server-side modification time (ms)
+	mtimeCli?: number; // Client-side modification time (ms)
+	ctimeCli?: number; // Client-side creation time (ms)
+	mtimeSvr?: number; // Server-side modification time (ms)
 
-  prevSyncTime?: number; // When this file was last synced (populated from DB)
+	prevSyncTime?: number; // When this file was last synced (populated from DB)
 
-  sizeRaw: number;       // Actual byte size
-  sizeEnc?: number;      // Encrypted byte size (larger due to overhead)
+	sizeRaw: number; // Actual byte size
+	sizeEnc?: number; // Encrypted byte size (larger due to overhead)
 
-  etag?: string;         // Version/hash identifier (optional)
-  hash?: string;
+	etag?: string; // Version/hash identifier (optional)
+	hash?: string;
 
-  synthesizedFolder?: boolean; // Inferred from file paths, not returned by API
+	synthesizedFolder?: boolean; // Inferred from file paths, not returned by API
 }
 ```
 
 For a filen.io adapter:
+
 - `mtimeSvr` = filen's `lastModified` in milliseconds
 - `sizeRaw` = file size in bytes
 - `etag`/`hash` = filen's UUID or content hash if available
@@ -126,6 +132,7 @@ constructor(
 ```
 
 Key behaviours:
+
 - `walk()` uses `vault.getAllLoadedFiles()` — returns `TFile` and `TFolder`
 - Folders get a trailing `/` appended to their path
 - `writeFile()` calls `vault.adapter.writeBinary(key, content, { mtime, ctime })`
@@ -141,9 +148,9 @@ Located in `pro/src/sync.ts` (proprietary module, not public). Runs in stages:
 ### Stage 1 — Walk
 
 ```typescript
-const localFiles  = await fsLocal.walk();
+const localFiles = await fsLocal.walk();
 const remoteFiles = await fsRemote.walk();
-const prevSync    = await db.getAllPrevSyncRecords(vaultID, profileID);
+const prevSync = await db.getAllPrevSyncRecords(vaultID, profileID);
 ```
 
 ### Stage 2 — Ensemble
@@ -152,11 +159,11 @@ Merge all three lists into `Map<string, MixedEntity>`:
 
 ```typescript
 interface MixedEntity {
-  key: string;
-  local?: Entity;    // undefined = file not on local
-  remote?: Entity;   // undefined = file not on remote
-  prevSync?: Entity; // undefined = never synced before
-  decision?: DecisionType;
+	key: string;
+	local?: Entity; // undefined = file not on local
+	remote?: Entity; // undefined = file not on remote
+	prevSync?: Entity; // undefined = never synced before
+	decision?: DecisionType;
 }
 ```
 
@@ -171,33 +178,33 @@ remoteEqualPrev = (remote.mtime == prevSync.mtime && remote.size == prevSync.siz
 
 Full decision table (files):
 
-| Condition | Decision |
-|---|---|
-| all three equal / sizes match | `equal` |
-| local≠prev, remote=prev | `local_is_modified_then_push` |
-| local=prev, remote≠prev | `remote_is_modified_then_pull` |
-| local exists, no prev, no remote | `local_is_created_then_push` |
-| remote exists, no prev, no local | `remote_is_created_then_pull` |
-| no local, no prev, remote exists | `remote_is_created_then_pull` |
-| local missing, remote=prev | `local_is_deleted_thus_also_delete_remote` |
-| remote missing, local=prev | `remote_is_deleted_thus_also_delete_local` |
-| local≠prev AND remote≠prev | `conflict_modified_then_*` |
-| local new AND remote new | `conflict_created_then_*` |
-| exceeds `skipSizeLargerThan` | `*_too_large_then_do_nothing` |
+| Condition                        | Decision                                   |
+| -------------------------------- | ------------------------------------------ |
+| all three equal / sizes match    | `equal`                                    |
+| local≠prev, remote=prev          | `local_is_modified_then_push`              |
+| local=prev, remote≠prev          | `remote_is_modified_then_pull`             |
+| local exists, no prev, no remote | `local_is_created_then_push`               |
+| remote exists, no prev, no local | `remote_is_created_then_pull`              |
+| no local, no prev, remote exists | `remote_is_created_then_pull`              |
+| local missing, remote=prev       | `local_is_deleted_thus_also_delete_remote` |
+| remote missing, local=prev       | `remote_is_deleted_thus_also_delete_local` |
+| local≠prev AND remote≠prev       | `conflict_modified_then_*`                 |
+| local new AND remote new         | `conflict_created_then_*`                  |
+| exceeds `skipSizeLargerThan`     | `*_too_large_then_do_nothing`              |
 
 Folder decisions use the same logic with `folder_` prefixed variants.
 
 ### Stage 4 — Execute
 
-| Decision | Operations |
-|---|---|
-| push | `remote.writeFile(key, await local.readFile(key), mtime, ctime)` |
-| pull | `local.writeFile(key, await remote.readFile(key), mtime, ctime)` |
-| delete remote | `remote.rm(key)` |
-| delete local | `local.rm(key)` |
-| mkdir remote | `remote.mkdir(key)` |
-| mkdir local | `local.mkdir(key)` |
-| equal / skip | nothing |
+| Decision      | Operations                                                       |
+| ------------- | ---------------------------------------------------------------- |
+| push          | `remote.writeFile(key, await local.readFile(key), mtime, ctime)` |
+| pull          | `local.writeFile(key, await remote.readFile(key), mtime, ctime)` |
+| delete remote | `remote.rm(key)`                                                 |
+| delete local  | `local.rm(key)`                                                  |
+| mkdir remote  | `remote.mkdir(key)`                                              |
+| mkdir local   | `local.mkdir(key)`                                               |
+| equal / skip  | nothing                                                          |
 
 Concurrency: default 5 parallel operations via `p-queue`.
 
@@ -210,7 +217,7 @@ After each successful operation, upsert the `prevSync` record with the new `Enti
 ## Conflict Resolution
 
 ```typescript
-type ConflictActionType = "keep_newer" | "keep_larger" | "smart_conflict"
+type ConflictActionType = "keep_newer" | "keep_larger" | "smart_conflict";
 ```
 
 - **keep_newer**: Use file with the later `mtime`. Ties go to local.
@@ -223,11 +230,11 @@ type ConflictActionType = "keep_newer" | "keep_larger" | "smart_conflict"
 
 ```typescript
 type SyncDirectionType =
-  | "bidirectional"
-  | "incremental_pull_only"
-  | "incremental_push_only"
-  | "incremental_pull_and_delete_only"
-  | "incremental_push_and_delete_only"
+	| "bidirectional"
+	| "incremental_pull_only"
+	| "incremental_push_only"
+	| "incremental_pull_and_delete_only"
+	| "incremental_push_and_delete_only";
 ```
 
 Pull-only: local changes are ignored. Push-only: remote changes are ignored.
@@ -253,13 +260,13 @@ await upsertPrevSyncRecordByVaultAndProfile(db, vaultID, profileID, entityAfterS
 
 ### Other tables
 
-| Table | Purpose |
-|---|---|
+| Table                     | Purpose                                        |
+| ------------------------- | ---------------------------------------------- |
 | `vaultRandomIDMappingTbl` | Maps vault path ↔ nanoid (multi-vault support) |
-| `syncPlanRecordTbl` | Last 20 sync decision logs (debug) |
-| `lastSuccessSyncTimeTbl` | Timestamp of last clean sync |
-| `lastFailedSyncTimeTbl` | Timestamp of last failed sync |
-| `pluginVersionTbl` | Detect upgrades, trigger migrations |
+| `syncPlanRecordTbl`       | Last 20 sync decision logs (debug)             |
+| `lastSuccessSyncTimeTbl`  | Timestamp of last clean sync                   |
+| `lastFailedSyncTimeTbl`   | Timestamp of last failed sync                  |
+| `pluginVersionTbl`        | Detect upgrades, trigger migrations            |
 
 ---
 
@@ -284,7 +291,7 @@ onload()
 ### `syncRun(triggerSource)`
 
 ```typescript
-type SyncTriggerSourceType = "manual" | "dry" | "auto" | "auto_once_init" | "auto_sync_on_save"
+type SyncTriggerSourceType = "manual" | "dry" | "auto" | "auto_once_init" | "auto_sync_on_save";
 ```
 
 1. Guard: if `isSyncing === true`, abort.
@@ -304,6 +311,7 @@ Two modes (mutually exclusive):
 - **Allow list** (`onlyAllowPaths: string[]`): if non-empty, only matching paths are synced.
 
 Extra flags:
+
 - `syncConfigDir: boolean` — include `.obsidian/`
 - `syncUnderscoreItems: boolean` — include files starting with `_`
 
@@ -315,27 +323,27 @@ Inheritance rule: if a folder is skipped, all its children are skipped. If a chi
 
 ```typescript
 interface RemotelySavePluginSettings {
-  serviceType: string;              // which provider is active
+	serviceType: string; // which provider is active
 
-  autoRunEveryMilliseconds: number; // 0 = disabled
-  initRunAfterMilliseconds: number; // delay before first sync on startup
-  syncOnSaveAfterMilliseconds: number; // delay after file change
+	autoRunEveryMilliseconds: number; // 0 = disabled
+	initRunAfterMilliseconds: number; // delay before first sync on startup
+	syncOnSaveAfterMilliseconds: number; // delay after file change
 
-  concurrency: number;              // default 5
-  skipSizeLargerThan: number;       // -1 = unlimited
+	concurrency: number; // default 5
+	skipSizeLargerThan: number; // -1 = unlimited
 
-  ignorePaths: string[];
-  onlyAllowPaths: string[];
+	ignorePaths: string[];
+	onlyAllowPaths: string[];
 
-  syncConfigDir: boolean;
-  syncUnderscoreItems: boolean;
+	syncConfigDir: boolean;
+	syncUnderscoreItems: boolean;
 
-  conflictAction: ConflictActionType;
-  syncDirection: SyncDirectionType;
+	conflictAction: ConflictActionType;
+	syncDirection: SyncDirectionType;
 
-  deleteToWhere: "system" | "obsidian";
+	deleteToWhere: "system" | "obsidian";
 
-  password: string;                 // encryption password (empty = no encryption)
+	password: string; // encryption password (empty = no encryption)
 }
 ```
 
@@ -351,39 +359,65 @@ import { FakeFs } from "./fsAll";
 import type { Entity } from "./baseTypes";
 
 export interface FilenConfig {
-  email: string;
-  password: string;         // Used by SDK to derive keys
-  syncFolderPath: string;   // Remote folder, e.g. "/Obsidian/MyVault"
+	email: string;
+	password: string; // Used by SDK to derive keys
+	syncFolderPath: string; // Remote folder, e.g. "/Obsidian/MyVault"
 }
 
 export class FakeFsFilen extends FakeFs {
-  kind = "filen" as const;
-  private sdk: FilenSDK;
-  private config: FilenConfig;
+	kind = "filen" as const;
+	private sdk: FilenSDK;
+	private config: FilenConfig;
 
-  constructor(config: FilenConfig) {
-    super();
-    this.sdk = new FilenSDK({ email: config.email, password: config.password });
-    this.config = config;
-  }
+	constructor(config: FilenConfig) {
+		super();
+		this.sdk = new FilenSDK({ email: config.email, password: config.password });
+		this.config = config;
+	}
 
-  async walk(): Promise<Entity[]> { /* ... */ }
-  async stat(key: string): Promise<Entity> { /* ... */ }
-  async mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity> { /* ... */ }
-  async writeFile(key: string, content: ArrayBuffer, mtime: number, ctime: number): Promise<Entity> { /* ... */ }
-  async readFile(key: string): Promise<ArrayBuffer> { /* ... */ }
-  async rename(key1: string, key2: string): Promise<void> { /* ... */ }
-  async rm(key: string): Promise<void> { /* ... */ }
-  async checkConnect(): Promise<boolean> { return this.checkConnectCommonOps(); }
-  async getUserDisplayName(): Promise<string> { /* ... */ }
-  async revokeAuth(): Promise<any> {}
-  allowEmptyFile(): boolean { return true; }
+	async walk(): Promise<Entity[]> {
+		/* ... */
+	}
+	async stat(key: string): Promise<Entity> {
+		/* ... */
+	}
+	async mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity> {
+		/* ... */
+	}
+	async writeFile(
+		key: string,
+		content: ArrayBuffer,
+		mtime: number,
+		ctime: number,
+	): Promise<Entity> {
+		/* ... */
+	}
+	async readFile(key: string): Promise<ArrayBuffer> {
+		/* ... */
+	}
+	async rename(key1: string, key2: string): Promise<void> {
+		/* ... */
+	}
+	async rm(key: string): Promise<void> {
+		/* ... */
+	}
+	async checkConnect(): Promise<boolean> {
+		return this.checkConnectCommonOps();
+	}
+	async getUserDisplayName(): Promise<string> {
+		/* ... */
+	}
+	async revokeAuth(): Promise<any> {}
+	allowEmptyFile(): boolean {
+		return true;
+	}
 }
 ```
 
 ### `walk()` — hardest method
 
 Must return a flat `Entity[]` where:
+
 - Every file: `{ keyRaw: "folder/sub/file.md", sizeRaw: 1234, mtimeSvr: 1700000000000 }`
 - Every folder: `{ keyRaw: "folder/", sizeRaw: 0, mtimeSvr: ... }`
 
@@ -427,17 +461,17 @@ User triggers sync (ribbon / command / auto / on-save)
 
 ## What to Copy vs. Rewrite
 
-| File | Action | Notes |
-|---|---|---|
-| `fsAll.ts` | Copy | Abstract base class, provider-agnostic |
-| `fsLocal.ts` | Copy | Obsidian vault adapter works as-is |
-| `baseTypes.ts` | Copy + trim | Keep `Entity`, decision types; remove S3/Dropbox refs |
-| `localdb.ts` | Copy + trim | Keep prev-sync logic; remove multi-provider noise |
-| `misc.ts` | Copy + trim | Path utilities are fully generic |
+| File              | Action          | Notes                                                               |
+| ----------------- | --------------- | ------------------------------------------------------------------- |
+| `fsAll.ts`        | Copy            | Abstract base class, provider-agnostic                              |
+| `fsLocal.ts`      | Copy            | Obsidian vault adapter works as-is                                  |
+| `baseTypes.ts`    | Copy + trim     | Keep `Entity`, decision types; remove S3/Dropbox refs               |
+| `localdb.ts`      | Copy + trim     | Keep prev-sync logic; remove multi-provider noise                   |
+| `misc.ts`         | Copy + trim     | Path utilities are fully generic                                    |
 | `pro/src/sync.ts` | **Reimplement** | Proprietary — not in public repo; rewrite from decision table above |
-| `fsFilen.ts` | **Write new** | Our core contribution |
-| `main.ts` | **Write new** | Simpler lifecycle; no OAuth/Dropbox complexity |
-| `settings.ts` | **Write new** | Only filen config fields |
+| `fsFilen.ts`      | **Write new**   | Our core contribution                                               |
+| `main.ts`         | **Write new**   | Simpler lifecycle; no OAuth/Dropbox complexity                      |
+| `settings.ts`     | **Write new**   | Only filen config fields                                            |
 
 ---
 
@@ -466,9 +500,9 @@ src/
 
 ```json
 {
-  "@filen/sdk": "latest",
-  "localforage": "^1",
-  "p-queue": "^8",
-  "nanoid": "^5"
+	"@filen/sdk": "latest",
+	"localforage": "^1",
+	"p-queue": "^8",
+	"nanoid": "^5"
 }
 ```

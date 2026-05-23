@@ -8,12 +8,12 @@ Current baseline: direct Filen folder mirror, manual sync only.
 
 Implement missing-side decisions against prev-sync state.
 
-| Case | Action |
-| --- | --- |
-| local missing, remote equals prev | delete remote, delete DB record |
-| remote missing, local equals prev | delete local, delete DB record |
-| local missing, remote changed | pull remote or conflict per mode |
-| remote missing, local changed | push local or conflict per mode |
+| Case                              | Action                           |
+| --------------------------------- | -------------------------------- |
+| local missing, remote equals prev | delete remote, delete DB record  |
+| remote missing, local equals prev | delete local, delete DB record   |
+| local missing, remote changed     | pull remote or conflict per mode |
+| remote missing, local changed     | push local or conflict per mode  |
 
 This is the main correctness gap.
 

@@ -191,7 +191,12 @@ export type FilenRemoteError =
 
 export type RemoteFs = {
 	walk(): Promise<Result<RemoteEntry[], FilenRemoteError>>;
-	writeFile(path: string, bytes: Uint8Array, mtime: number, ctime: number): Promise<Result<void, FilenRemoteError>>;
+	writeFile(
+		path: string,
+		bytes: Uint8Array,
+		mtime: number,
+		ctime: number,
+	): Promise<Result<void, FilenRemoteError>>;
 	readFile(path: string): Promise<Result<Uint8Array, FilenRemoteError>>;
 	rm(path: string): Promise<Result<void, FilenRemoteError>>;
 };
